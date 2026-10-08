@@ -353,7 +353,6 @@ def run(config=None, inputs=None):
     team_game["bench_net_rating_last_5"] = (
         team_game.groupby("TEAM_ID")["bench_net_rating"]
         .transform(lambda x: x.shift(1).rolling(5, min_periods=3).mean())
-        .fillna(0)
     )
 
     top_n = rolling_cfg.get("top_n_players", 8)
@@ -416,7 +415,7 @@ def run(config=None, inputs=None):
     df_model = df_model.merge(ot.rename(columns={"team": "away", "after_ot": "away_after_ot"}), on=["GAME_ID", "away"], how="left")
     df_model["after_ot_flag"] = df_model["home_after_ot"].fillna(0) - df_model["away_after_ot"].fillna(0)
 
-    df_model["bench_net_rating_last_5"] = df_model["home_bench_net_rating_last_5"].fillna(0) - df_model["away_bench_net_rating_last_5"].fillna(0)
+    df_model["bench_net_rating_last_5"] = df_model["home_bench_net_rating_last_5"] - df_model["away_bench_net_rating_last_5"]
 
     df_model["top8_points_diff"] = (
         df_model[f"home_top{top_n}_points_r5"] - df_model[f"away_top{top_n}_points_r5"]

@@ -241,17 +241,6 @@ STATIC_FEATURES = [
     "pyth_diff",           # Pythagorean quality differential
 ]
 
-DYNAMIC_PREFIXES = (
-    "home_team_adv_", "away_team_adv_",
-    "home_team_ff_",  "away_team_ff_",
-    "home_team_sc_",  "away_team_sc_",
-    "home_team_usg_", "away_team_usg_",
-    "home_team_misc_","away_team_misc_",
-    "home_team_ptrk_","away_team_ptrk_",
-)
-DYNAMIC_SUFFIXES = ("_r5", "_r10", "_r20", "_ewm5", "_ewm10", "_ewm20", "_s2d")
-
-
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _canonical_game_id(s: pd.Series) -> pd.Series:
@@ -421,6 +410,7 @@ def load_data() -> pd.DataFrame:
     df["payout_away"] = pa.where(pa > 0, DEFAULT_PAYOUT).fillna(DEFAULT_PAYOUT)
 
     df = add_oliver_features(df)
+    df = df[df["spread_signed"].notna()]  # no line: nothing to learn or bet
     df = df.sort_values("GAME_DATE", kind="stable").reset_index(drop=True)
     return df
 
@@ -428,19 +418,14 @@ def load_data() -> pd.DataFrame:
 # ── Feature selection ─────────────────────────────────────────────────────────
 
 def build_features(df: pd.DataFrame) -> list:
-    """Select feature columns using Oliver-curated allowlist. FROZEN except EXTRA_FEATURE_EXCLUSIONS/INCLUSIONS."""
-    # Dynamic columns: rolling team stats from nba-api (all windows/prefixes)
-    dynamic = [
-        c for c in df.columns
-        if c.startswith(DYNAMIC_PREFIXES) and c.endswith(DYNAMIC_SUFFIXES)
-    ]
+    """Select feature columns using Oliver-curated allowlist. FROZEN except EXTRA_FEATURE_EXCLUSIONS/INCLUSIONS.
 
+    The ~210 rolling nba-api team-stat columns (home_team_adv_*_r5 ... _s2d) are no longer included by default:
+    on the leak-free table they measured at noise level and adding them lowered the model's correlation with the
+    market's error (0.046 static only vs 0.021 with them). Add individual ones via EXTRA_FEATURE_INCLUSIONS."""
     deny = DENY_EXACT | set(EXTRA_FEATURE_EXCLUSIONS)
 
-    # Start from curated static allowlist + dynamic columns
-    candidates = sorted(set(
-        [c for c in STATIC_FEATURES if c in df.columns] + dynamic
-    ))
+    candidates = sorted(set(c for c in STATIC_FEATURES if c in df.columns))
 
     features = []
     for c in candidates:
@@ -629,9 +614,14 @@ def _fit_predict(spec, X_tr, y_tr, X_te):
 
 
 def _run_fold(train_df, test_df, features) -> dict:
-    """Fit every model on one walk-forward fold. Returns {model_id: (test preds, sigma, test rmse)}."""
-    X_tr, y_tr = train_df[features], train_df["home_margin"]
+    """Fit every model on one walk-forward fold. Returns {model_id: (test preds, sigma, test rmse)}.
+
+    Models learn the MARKET'S ERROR (home_margin + spread_signed, i.e. how far the result lands from the line)
+    rather than the raw margin, so they don't spend capacity re-learning the line. Predictions are converted back to
+    a home margin (error - spread_signed), so sigma, RMSE and everything downstream are unchanged in meaning."""
+    X_tr, y_tr = train_df[features], train_df["home_margin"] + train_df["spread_signed"]
     X_te, y_te = test_df[features], test_df["home_margin"]
+    line_te = test_df["spread_signed"].values
 
     # Drop columns that are all-NaN in training
     valid_cols = X_tr.columns[X_tr.notna().any()].tolist()
@@ -639,8 +629,8 @@ def _run_fold(train_df, test_df, features) -> dict:
 
     res = {}
     for spec in MODEL_SPECS:
-        p_te = _fit_predict(spec, X_tr, y_tr, X_te)
-        # sigma from out-of-sample residuals: fit on the first 80% of train, score the last 20%
+        p_te = _fit_predict(spec, X_tr, y_tr, X_te) - line_te
+        # sigma from out-of-sample residuals (error-space and margin-space residuals are identical): fit on the first 80% of train, score the last 20%
         cut = int(len(X_tr) * 0.8)
         p_val = _fit_predict(spec, X_tr.iloc[:cut], y_tr.iloc[:cut], X_tr.iloc[cut:])
         sigma = float(np.std(y_tr.iloc[cut:].values - p_val)) or 1.0

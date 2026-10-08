@@ -243,7 +243,6 @@ def run(config=None, inputs=None):
                 roll_features[f"team_{stat}_r{w}"] = (
                     df.groupby("team")[stat]
                     .transform(lambda x: x.shift(1).rolling(w, min_periods=window_min).mean())
-                    .fillna(0)
                 )
 
     if roll_features:
@@ -262,7 +261,6 @@ def run(config=None, inputs=None):
                 ewm_features[f"team_{col}_ewm{w}"] = (
                     df.groupby("team")[col]
                     .transform(lambda x: _ewm_rolling(x, w, decay))
-                    .fillna(0)
                 )
 
     if ewm_features:
@@ -278,7 +276,6 @@ def run(config=None, inputs=None):
                 s2d_features[f"team_{stat}_s2d"] = (
                     df.groupby(["team", "season"])[stat]
                     .transform(lambda x: x.shift(1).expanding(min_periods=s2d_min_games).mean())
-                    .fillna(0)
                 )
 
         if s2d_features:

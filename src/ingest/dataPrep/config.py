@@ -45,6 +45,7 @@ DEFAULT_CONFIG = {
                 "start": 1500,
                 "k": 20,
                 "home_advantage": 65,
+                "season_carryover": 0.75,  # share of last season's Elo kept at a new season
             },
             "rolling": {
                 "window": 5,
