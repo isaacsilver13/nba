@@ -23,6 +23,7 @@ venv/
 
 # Generated model outputs and experiment artifacts
 /outputs/
+/experiments/
 *.tsv
 
 # Keep small checked-in samples and documentation

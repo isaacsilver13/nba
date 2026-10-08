@@ -33,6 +33,6 @@ This repo's central mechanism is `autorun.py` driving an LLM (Groq or OpenAI, pe
 ## Data pipeline
 
 - `src/ingest/dataPrep/config.py` owns shared DataPrep defaults and per-step overrides; `src/ingest/dataPrep/pipeline.py` owns orchestration; individual steps live under `src/ingest/dataPrep/steps/`.
-- `src/ingest/models/` holds trained model artifacts by name (e.g. `Edge_LightGBM/`); `src/ingest/old/` is prior-generation ingestion code kept for reference, not part of the active pipeline.
+- `experiment.py` is the only model/backtest code. Earlier model scripts (`src/ingest/models/`, `src/ingest/old/`) and autorun snapshots were removed 2026-10-08; they were built on leaky features and are in git history if needed.
 - For lineup ingestion, official boxscore-listed players count as appearances (including DNPs) — don't add a separate player-stat download path for this.
 - Prefer read-through caches and full artifact reconstruction over partial-cache assumptions; check cache completeness, file dates, and column names before re-fetching. Preserve existing cache paths/schemas unless a migration is explicit.
