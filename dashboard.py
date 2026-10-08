@@ -134,7 +134,7 @@ if need_complete():
         fig = go.Figure([go.Scatter(x=[0, 1], y=[0, 1], mode="lines", line=dict(dash="dash"), name="Perfect")])
         fig.add_trace(go.Scatter(x=rel["mean_pred"], y=rel["actual"], mode="markers+lines",
                                  text=rel["n"].map("n={}".format), name="Model"))
-        fig.update_layout(xaxis_title="Predicted P(home win)", yaxis_title="Observed home win rate")
+        fig.update_layout(xaxis_title="Predicted P(home covers)", yaxis_title="Observed home cover rate")
         st.plotly_chart(fig, use_container_width=True)
         st.caption("Bins with small n are noisy; see bin counts in hover.")
         st.dataframe(rel, use_container_width=True)

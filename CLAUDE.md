@@ -17,7 +17,7 @@ python autorun.py --groq --max-iters 20                 # autoresearch loop, LLM
 ```
 `autorun.py` resolves `experiment.py`, `program.md`, `results.tsv`, and `experiments/` relative to its own location, so it can be invoked from any working directory. Data locations are overridable via `NBA_DATA_DIR` / `NBA_OUTPUTS_DIR` env vars (default `./data`, `./outputs`).
 
-There is no test suite (the only `test_*.py` file is a standalone script under `src/ingest/old/Scripts/`, not part of an automated suite) — verify changes by running the narrowest relevant import, compile, or dry-run check, not by looking for tests to pass.
+Tests: `python -m pytest tests -q` (CI runs them). They need no local data; the slow point-in-time leakage check (`tools/pit_check.py`, ~2 min, needs `data/processed`) runs with `RUN_PIT=1`. After changing feature code, also run `python tools/leak_screen.py` — see `docs/feature-leakage-audit-and-fix-plan.md`.
 
 Do not commit raw or processed datasets, generated outputs, model artifacts, runtime logs, or credentials — small reproducible fixtures belong under `data/sample/`.
 

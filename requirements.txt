@@ -1,9 +1,11 @@
-numpy
-pandas
-scipy
-scikit-learn
-lightgbm
-xgboost
-streamlit
-plotly
-openai
+numpy==2.5.3
+pandas==3.0.6
+scipy==1.18.1
+scikit-learn==1.9.1
+joblib==1.6.0
+lightgbm==4.7.0
+xgboost==3.4.1
+streamlit==1.65.0
+plotly==7.1.0
+openai==3.24.0
+nba_api  # ingestion steps 1 and 3 only

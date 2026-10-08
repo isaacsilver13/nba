@@ -356,13 +356,6 @@ def main() -> None:
     if not os.path.exists(baseline_path):
         shutil.copy2(EXPERIMENT_FILE, baseline_path)
         print(f"[autorun] baseline saved → {baseline_path}")
-    # Cache the immutable header (docstring + imports) from the baseline.
-    # This is NEVER re-derived from the current experiment.py so the agent
-    # can never accidentally drop the import block.
-    immutable_header, _, _ = split_experiment(read_file(baseline_path))
-    if not immutable_header.strip():
-        print("ERROR: Could not parse header from baseline. Check exp_0000.py.")
-        sys.exit(1)
     iteration = 0
     best_score = get_best_score()
     tried_history: list = []  # track all tried config diffs this session
@@ -389,9 +382,10 @@ def main() -> None:
         # Save unmodified code in case we need to revert
         original_code = read_file(EXPERIMENT_FILE)
 
-        # Split original code to get the frozen section (config changes each iter;
-        # header is always taken from the immutable cache)
-        _, _, frozen_part = split_experiment(original_code)
+        # The agent only ever returns the config block, so the header (docstring + imports) and the frozen
+        # section are always the current file's own. (Taking the header from the exp_0000.py snapshot broke
+        # every iteration once experiment.py gained imports the snapshot lacked.)
+        header, _, frozen_part = split_experiment(original_code)
 
         tried_entry: dict = {"iteration": iteration, "score": None, "diff_lines": []}
 
@@ -422,8 +416,8 @@ def main() -> None:
             _, current_config, _ = split_experiment(original_code)
             tried_entry["diff_lines"] = config_diff_lines(current_config, new_config)
 
-            # Reconstruct: immutable header + new config + original frozen code
-            modified_code = immutable_header + "\n\n" + new_config + frozen_part
+            # Reconstruct: current header + new config + original frozen code
+            modified_code = header + "\n\n" + new_config + frozen_part
 
             # Sanity-check: frozen boundary must still be present
             if FROZEN_MARKER not in modified_code:
