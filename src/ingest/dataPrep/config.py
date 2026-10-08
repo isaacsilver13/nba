@@ -125,14 +125,7 @@ DEFAULT_CONFIG = {
                 "min_games": 3,
                 "team_rolls": [5, 10],
                 "top_n_players": 8,
-                "top_usage_n": 2,
                 "bench_top_n": 5,
-            },
-            "player_strength": {
-                "key_score_threshold": 0.75,
-            },
-            "injury": {
-                "half_life_days": 7,
             },
         },
         "step5": {
@@ -375,10 +368,6 @@ DEFAULT_CONFIG = {
                     "home_elo_roll_2Y_rest_advantage",
                     "pace_diff_rest_diff",
                     "net_rating_diff_rest_diff",
-                    "abs_edge",
-                    "edge_rank_today",
-                    "edge_percentile_last_30_days",
-                    "model_error_roll_last20",
                     "team_style_vs_opponent_style",
                 ]
             },

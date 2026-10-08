@@ -5,7 +5,6 @@ Select one run bundle; every number comes from that run's manifest-declared arti
 """
 
 import json
-import runpy
 from pathlib import Path
 
 import pandas as pd
@@ -13,7 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from src.research_dashboard.catalog import legacy_entry, list_runs, outputs_dir
+from src.research_dashboard.catalog import list_runs, outputs_dir
 from src.research_dashboard.manifest import ODDS_TIERS
 from src.research_dashboard.views import bet_summary, filter_tiers, reliability
 
@@ -67,13 +66,9 @@ st.caption("Historical research results. Not betting advice or live picks.")
 
 if st.sidebar.button("Refresh"):
     st.cache_data.clear()
-include_legacy = st.sidebar.toggle("Include legacy / unbundled data", value=False)
 
 runs = _runs(str(OUTPUTS), _stamp())
-tabs = ["Run Health", "Model Quality", "Odds Quality", "Betting Simulation", "Experiment Log"]
-if include_legacy:
-    tabs.append("Legacy / unbundled")
-t_health, t_model, t_odds, t_bets, t_log, *t_legacy = st.tabs(tabs)
+t_health, t_model, t_odds, t_bets, t_log = st.tabs(["Run Health", "Model Quality", "Odds Quality", "Betting Simulation", "Experiment Log"])
 
 run = None
 if runs:
@@ -180,13 +175,3 @@ with t_log:
                                 hover_data=["exp_id", "score", "roi"]), use_container_width=True)
         st.dataframe(res.drop(columns=["models"], errors="ignore").sort_values("timestamp", ascending=False),
                      use_container_width=True, height=400)
-
-if t_legacy:
-    with t_legacy[0]:
-        st.warning("Legacy / unbundled: these files share no run ID and carry no per-bet odds tier. "
-                   "Do not read them as one result.")
-        st.json(legacy_entry(BASE_DIR))
-        try:
-            runpy.run_path(str(BASE_DIR / "legacy_dashboard.py"))
-        except Exception as exc:
-            st.error(f"Legacy view unavailable: {exc}")

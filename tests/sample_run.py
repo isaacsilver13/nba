@@ -50,7 +50,7 @@ def write_sources(d: Path, seed: int = 0) -> dict:
     out = {}
     for name, df in paths.items():
         out[name] = d / f"{name}.csv"
-        df.to_csv(out[name], index=False)
+        df.to_csv(out[name], index=False, lineterminator="\n")  # same bytes on every OS, so committed checksums hold
     out["metrics"] = d / "metrics.json"
     out["metrics"].write_text(json.dumps({"rmse": float(folds["rmse"].mean()), "mae": float(folds["mae"].mean()),
                                           "n_folds": len(folds), "starting_bankroll": 1.0, "units": "fraction of starting bankroll"}))

@@ -285,7 +285,7 @@ def run(config=None, inputs=None):
             df = pd.concat([df, pd.DataFrame(s2d_features, index=df.index)], axis=1)
         print(f"[step6] Added season-to-date features: {len(s2d_features):,}")
 
-    # Team style clustering (full season averages)
+    # Team style clustering (refit monthly on earlier games only; see _prior_style_map)
     style_cols = ["pace", "three_pa_rate", "paint_points", "rebound_rate", "net_rebounds", "net_three_pa"]
     style_map = _prior_style_map(df, date_col, style_cols)
 
@@ -347,70 +347,10 @@ def run(config=None, inputs=None):
     df_model["pace_diff_rest_diff"] = df_model.get("pace_diff", 0) * df_model.get("rest_diff", 0)
     df_model["net_rating_diff_rest_diff"] = df_model.get("net_rating_diff", 0) * df_model.get("rest_diff", 0)
 
-    # Edge features (if model_margin exists)
-    if "model_margin" in df_model.columns:
-        df_model["edge"] = df_model["model_margin"] - df_model["spread_signed"]
-    else:
-        df_model["edge"] = 0
-
-    df_model["abs_edge"] = df_model["edge"].abs()
-
-    date_col = "date_x" if "date_x" in df_model.columns else ("date" if "date" in df_model.columns else None)
+    # (the edge / edge-rank / model-error columns that used to be built here needed a `model_margin` column that
+    # no step produces, so they were constants; removed)
     if date_col:
-        df_model["edge_rank_today"] = (
-            df_model.groupby(date_col)["abs_edge"].rank(method="dense", ascending=False).fillna(0)
-        )
-
         df_model = df_model.sort_values(date_col).reset_index(drop=True)
-        dates = pd.to_datetime(df_model[date_col]).values
-        abs_edge_vals = df_model["abs_edge"].values
-        percentiles = np.zeros(len(df_model))
-        for i in range(len(df_model)):
-            cutoff = dates[i] - np.timedelta64(30, "D")
-            mask = (dates < dates[i]) & (dates >= cutoff)
-            percentiles[i] = (
-                (abs_edge_vals[mask] <= abs_edge_vals[i]).mean() if mask.any() else 0.5
-            )
-        df_model["edge_percentile_last_30_days"] = percentiles
-    else:
-        df_model["edge_rank_today"] = 0
-        df_model["edge_percentile_last_30_days"] = 0
-
-    # Rolling model error by team (if model_margin exists)
-    if "model_margin" in df_model.columns and date_col:
-        home_long = df_model[[date_col, "home", "home_margin", "model_margin"]].rename(
-            columns={date_col: "date", "home": "team", "home_margin": "actual_margin"}
-        )
-        home_long["model_margin_team"] = home_long["model_margin"]
-
-        away_long = df_model[[date_col, "away", "away_margin", "model_margin"]].rename(
-            columns={date_col: "date", "away": "team", "away_margin": "actual_margin"}
-        )
-        away_long["model_margin_team"] = -away_long["model_margin"]
-
-        model_long = pd.concat([home_long, away_long], ignore_index=True)
-        model_long["model_error"] = model_long["actual_margin"] - model_long["model_margin_team"]
-        model_long = model_long.sort_values(["team", "date"])
-
-        model_long["model_error_roll_last20"] = (
-            model_long.groupby("team")["model_error"]
-            .transform(lambda x: x.shift(1).rolling(20, min_periods=5).mean())
-            .fillna(0)
-        )
-
-        home_err = model_long.rename(columns={"team": "home", "model_error_roll_last20": "home_model_error_roll_last20"})
-        away_err = model_long.rename(columns={"team": "away", "model_error_roll_last20": "away_model_error_roll_last20"})
-
-        df_model = df_model.merge(home_err[["date", "home", "home_model_error_roll_last20"]],
-                                  left_on=[date_col, "home"], right_on=["date", "home"], how="left")
-        df_model = df_model.merge(away_err[["date", "away", "away_model_error_roll_last20"]],
-                                  left_on=[date_col, "away"], right_on=["date", "away"], how="left")
-
-        df_model["model_error_roll_last20"] = (
-            df_model["home_model_error_roll_last20"].fillna(0) - df_model["away_model_error_roll_last20"].fillna(0)
-        )
-    else:
-        df_model["model_error_roll_last20"] = 0
 
     # Save to cache if enabled
     save_output(df_model, output_path, cache_cfg)

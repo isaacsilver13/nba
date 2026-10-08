@@ -1,10 +1,11 @@
 import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from src.research_dashboard.capture_run import capture
-from src.research_dashboard.catalog import legacy_entry, list_runs
+from src.research_dashboard.catalog import list_runs
 from src.research_dashboard.manifest import load_manifest, safe_path
 from tests.sample_run import make_run, write_sources
 
@@ -77,7 +78,7 @@ def test_overlapping_folds_rejected(tmp_path):
     assert load_manifest(capture("r1", src, tmp_path / "out")).status == "partial"
 
 
-def test_catalog_orders_and_legacy_label(tmp_path):
+def test_catalog_orders_runs_and_lists_failed_last(tmp_path):
     out = tmp_path / "out"
     make_run(out, "a", tmp_path / "s1")
     make_run(out, "b", tmp_path / "s2", seed=1)
@@ -85,7 +86,6 @@ def test_catalog_orders_and_legacy_label(tmp_path):
     (out / "research_runs" / "bad" / "manifest.json").write_text("{not json")
     runs = list_runs(out)
     assert [r.status for r in runs][-1] == "failed" and len(runs) == 3
-    assert legacy_entry(tmp_path)["label"] == "Legacy / unbundled"
 
 
 def test_tier_filter_and_summary(tmp_path):
@@ -104,3 +104,9 @@ def test_fold_sharing_a_boundary_day_is_ok(tmp_path):
     f.loc[1, "test_start"] = f.loc[0, "test_end"]
     f.to_csv(src["fold_metrics"], index=False)
     assert load_manifest(capture("r1", src, tmp_path / "out")).status == "complete"
+
+
+def test_committed_sample_run_is_complete():
+    # the README points the dashboard at this bundle; a checksum drift (e.g. CRLF vs LF) silently made it "partial"
+    run = load_manifest(Path(__file__).resolve().parents[1] / "data" / "sample" / "research_runs" / "sample_complete")
+    assert run.status == "complete", run.problems
