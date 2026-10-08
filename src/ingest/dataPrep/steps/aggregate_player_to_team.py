@@ -25,6 +25,25 @@ except ImportError:
         from helpers import dedupe_player_games, load_cached_output, save_output
 
 
+def usage_concentration(df_players, top_ns=(2, 3)):
+    """How concentrated a team's offense was in one game: the top-N players' share of team usage.
+
+    Usage proxy per player = FGA + 0.44*FTA + turnovers (the possessions he used); share = proxy / team total.
+    Returns one row per (GAME_ID, team) with usg_top{N}_share. This replaces the V3 team-level usage percentage,
+    which is 1.0 by definition for a whole team and so carries no information. Built from counting stats only, so it
+    exists for every game that has a box score. It describes THIS game; step 6 lags it before the model sees it.
+    """
+    d = df_players[["GAME_ID", "team", "fga", "fta", "turnovers"]].copy()
+    d["used"] = d["fga"] + 0.44 * d["fta"] + d["turnovers"]
+    total = d.groupby(["GAME_ID", "team"])["used"].transform("sum").replace(0, np.nan)
+    d["share"] = d["used"] / total
+    ranked = d.sort_values("share", ascending=False).groupby(["GAME_ID", "team"])["share"]
+    out = d[["GAME_ID", "team"]].drop_duplicates().set_index(["GAME_ID", "team"])
+    for n in top_ns:
+        out[f"usg_top{n}_share"] = ranked.apply(lambda x, n=n: x.head(n).sum())
+    return out.reset_index()
+
+
 def run(config=None, inputs=None):
     """Aggregate player box scores into team and opponent metrics.
 
@@ -199,6 +218,8 @@ def run(config=None, inputs=None):
         team_with_opp["rebounds"] / (team_with_opp["rebounds"] + team_with_opp["rebounds_opp"] + 1e-6)
     ).fillna(0)
 
+    team_with_opp = team_with_opp.merge(usage_concentration(df_boxscores), on=["GAME_ID", "team"], how="left")
+
     if not df_team_v3.empty:
         team_v3 = df_team_v3.copy()
         if "GAME_ID" in team_v3.columns:
@@ -258,9 +279,14 @@ def run(config=None, inputs=None):
         metric_cols = [c for c in team_v3_norm.columns if c not in ["GAME_ID", "team"]]
         if metric_cols and "GAME_ID" in team_v3_norm.columns and "team" in team_v3_norm.columns:
             team_v3_norm = team_v3_norm.groupby(["GAME_ID", "team"], as_index=False)[metric_cols].mean()
+            team_v3_norm["_has_v3"] = 1
             team_with_opp = team_with_opp.merge(team_v3_norm, on=["GAME_ID", "team"], how="left")
+            has_v3 = team_with_opp.pop("_has_v3").notna()
             for col in metric_cols:
-                team_with_opp[col] = pd.to_numeric(team_with_opp[col], errors="coerce").fillna(0)
+                # a metric missing inside an existing V3 row is filled with 0 as before; a game with NO V3 row
+                # (backfilled from the box-score-only CSV) stays NaN so rolling means skip it instead of averaging in zeros
+                vals = pd.to_numeric(team_with_opp[col], errors="coerce")
+                team_with_opp[col] = vals.where(~has_v3, vals.fillna(0))
 
     assert team_with_opp.groupby("GAME_ID").size().eq(2).all()
     assert (team_with_opp["team"] != team_with_opp["opp_team"]).all()

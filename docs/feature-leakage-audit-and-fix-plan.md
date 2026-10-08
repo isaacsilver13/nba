@@ -192,3 +192,33 @@ in all 13,498 team-games, as are all 19 `usg_percentage_*` team columns and `adv
 EWM-smoothed, the features reduce to 0 (fewer than 3 games of history) or 1. They carry no information. The player-level
 version varies (mean 0.18; the top-2 players' usage per team-game averages 0.60, sd 0.09) and is what the feature
 presumably meant to summarize.
+
+## 8. Usage concentration features and box score backfill (2026-10-07)
+
+**Usage features.** The 14 constant `usg_usage_pct` features are replaced by 28 `usg_top2_share` / `usg_top3_share`
+features (rolling 5/10/20, EWM 5/10/20 and season-to-date, home and away). Per game, each player's usage is
+FGA + 0.44*FTA + turnovers; the feature is the share of the team total used by its top 2 (or top 3) players. It is built
+from counting stats only, so it exists for every game with a box score, and step 6 lags it like every other dynamic
+feature. Typical values: top-2 share about 0.39-0.40, top-3 about 0.53 (range 0.0-0.69; 0.0 only for early-history rows).
+
+**Backfill.** `python tools/backfill_boxscores.py` adds rows for games that have no box score, from
+`data/csv/player_boxscores.csv`: 176 games, 3,611 player rows (the 87 margin == spread games, 53 true pushes and 34
+underdog outright wins, plus 89 early-November 2019 games). The two sources agree 100% on points, attempts, turnovers,
+rebounds, minutes and team codes over the 8,439 player-games they share. Backfilled games have no DNP/inactive rows and
+no advanced metrics, so:
+- the pregame absence features are NaN for those games (and `prev_game_minutes_out` for the next game), not 0;
+- step 3a leaves the V3 advanced metrics NaN for games with no V3 row (it used to fill every missing metric with 0, which
+  reads as a real zero rating); rolling means skip them.
+The tool is idempotent and keeps the original as `all_boxscores.before_backfill.csv`. The feature table now has all
+6,902 games of the games table (it had 6,726).
+
+**Verification on the final feature set** (333 columns): 32 tests pass; point-in-time check on 2023-01-04 passes;
+leak screen passes (312 features, cutoff 0.0039, none flagged, including all 28 new usage features).
+
+| Pre-registered backtest, same rules, 4,858 priced games | rho | Primary threshold | Flat ROI | 95% CI |
+|---|---|---|---|---|
+| BetMGM-settled (variant B) | 0.054 | n=302, cover 52.6% | -0.5% | [-11.2%, +10.2%] |
+| Kaggle-only control (variant A) | 0.038 | n=148, cover 48.0% | -8.4% | [-23.9%, +7.0%] |
+
+Dynamic features (now including usage concentration) re-tested: static only rho 0.046, dynamic only 0.033, all 0.021
+(standard error about 0.022): noise level, and every raw model is about 0.4 RMSE worse than the line. No edge.

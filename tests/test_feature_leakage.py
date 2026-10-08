@@ -192,3 +192,14 @@ def test_endpoint_families_with_repeated_keys_cannot_multiply_player_rows(tmp_pa
     assert len(players) == 3 and not players.duplicated(["GAME_ID", "TEAM_ID", "PLAYER_ID"]).any()
     with pytest.raises(ValueError, match="repeat"):
         fetch._require_unique(pd.concat([players, players]), ["GAME_ID", "TEAM_ID", "PLAYER_ID"], "player boxscores")
+
+
+def test_usage_concentration_is_the_top_n_share_of_team_usage():
+    from ingest.dataPrep.steps import aggregate_player_to_team as agg
+    # team A: usage proxies 50/30/10/10 (fta=0, tov=0 so proxy == fga); team B: five equal players
+    rows = [("A", 50), ("A", 30), ("A", 10), ("A", 10)] + [("B", 20)] * 5
+    d = pd.DataFrame({"GAME_ID": "0021900001", "team": [t for t, _ in rows], "fga": [u for _, u in rows],
+                      "fta": 0, "turnovers": 0})
+    out = agg.usage_concentration(d).set_index("team")
+    assert np.isclose(out.loc["A", "usg_top2_share"], 0.80) and np.isclose(out.loc["A", "usg_top3_share"], 0.90)
+    assert np.isclose(out.loc["B", "usg_top2_share"], 0.40) and np.isclose(out.loc["B", "usg_top3_share"], 0.60)

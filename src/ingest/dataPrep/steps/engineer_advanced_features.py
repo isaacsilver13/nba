@@ -388,10 +388,17 @@ def run(config=None, inputs=None):
         df_players["pregame_out"], df_players["player_usage_proxy_r5"], 0
     )
 
+    # Games backfilled from the box-score-only CSV have no DNP/inactive rows: absences are UNKNOWN there, not zero.
+    if "endpoint_family" in df_players.columns:
+        df_players["absence_unknown"] = df_players["endpoint_family"].eq("csv_backfill")
+    else:
+        df_players["absence_unknown"] = False
+
     missing_flags = (
         df_players.groupby(["GAME_ID", "TEAM_ID", "team"], as_index=False)
         .agg(
             date=("date", "first"),
+            absence_unknown=("absence_unknown", "max"),
             pregame_missing_top1=("pregame_missing_top1", "max"),
             pregame_missing_top2=("pregame_missing_top2", "max"),
             pregame_minutes_out=("pregame_minutes_out", "sum"),
@@ -403,6 +410,8 @@ def run(config=None, inputs=None):
     missing_flags["prev_game_minutes_out"] = (
         missing_flags.groupby("TEAM_ID")["pregame_minutes_out"].shift(1).fillna(0)
     )
+    prev_unknown = missing_flags.groupby("TEAM_ID")["absence_unknown"].shift(1).fillna(False).astype(bool)
+    missing_flags.loc[prev_unknown, "prev_game_minutes_out"] = np.nan
     missing_flags = missing_flags.drop(columns="date")
     MISSING_COLS = [
         "pregame_missing_top1", "pregame_missing_top2",
@@ -612,8 +621,10 @@ def run(config=None, inputs=None):
         .merge(away_players, left_on="GAME_ID", right_on="away_GAME_ID", how="left")
     )
 
-    home_missing = missing_flags.rename(columns={"team": "home", **{c: f"home_{c}" for c in MISSING_COLS}})
-    away_missing = missing_flags.rename(columns={"team": "away", **{c: f"away_{c}" for c in MISSING_COLS}})
+    home_missing = missing_flags.rename(columns={"team": "home", "absence_unknown": "home_absence_unknown",
+                                                 **{c: f"home_{c}" for c in MISSING_COLS}})
+    away_missing = missing_flags.rename(columns={"team": "away", "absence_unknown": "away_absence_unknown",
+                                                 **{c: f"away_{c}" for c in MISSING_COLS}})
 
     df_model = df_model.merge(home_missing.drop(columns="TEAM_ID"), on=["GAME_ID", "home"], how="left")
     df_model = df_model.merge(away_missing.drop(columns="TEAM_ID"), on=["GAME_ID", "away"], how="left")
@@ -631,8 +642,13 @@ def run(config=None, inputs=None):
     df_model = df_model.merge(home_bench, on=["GAME_ID", "home"], how="left")
     df_model = df_model.merge(away_bench, on=["GAME_ID", "away"], how="left")
 
+    unknown = df_model["home_absence_unknown"].fillna(False).astype(bool) | df_model["away_absence_unknown"].fillna(False).astype(bool)
     for c in MISSING_COLS:
         df_model[c] = df_model[f"home_{c}"].fillna(0) - df_model[f"away_{c}"].fillna(0)
+        df_model.loc[unknown, c] = np.nan  # backfilled game: absences unknown, not "none"
+    # the game after a backfilled one: its "previous game" absences are unknown too
+    prev_nan = df_model["home_prev_game_minutes_out"].isna() | df_model["away_prev_game_minutes_out"].isna()
+    df_model.loc[prev_nan, "prev_game_minutes_out"] = np.nan
     ot = team_game[["GAME_ID", "team", "after_ot"]]
     df_model = df_model.merge(ot.rename(columns={"team": "home", "after_ot": "home_after_ot"}), on=["GAME_ID", "home"], how="left")
     df_model = df_model.merge(ot.rename(columns={"team": "away", "after_ot": "away_after_ot"}), on=["GAME_ID", "away"], how="left")
