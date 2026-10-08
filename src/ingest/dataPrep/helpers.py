@@ -134,3 +134,19 @@ def parse_absence_reason(row, injury_key="injury_absence", rest_key="rest_absenc
     if row.get(personal_key) or row.get(trade_key):
         return "personal"
     return "other"
+
+
+def dedupe_player_games(df, game_col="GAME_ID", player_col="PLAYER_ID"):
+    """Keep one boxscore row per (game, player).
+
+    The ingested all_boxscores.csv repeats some player-games 16 or 32 times (a join fan-out; the box score columns are
+    identical, only advanced columns vary). Left in, team sums are inflated (e.g. 379 points) and a player's rolling
+    window counts the same game several times, so a duplicate row's "previous games" include its own game.
+    Expects game ids already normalised.
+    """
+    if game_col not in df.columns or player_col not in df.columns:
+        return df
+    out = df.drop_duplicates([game_col, player_col], keep="first")
+    if len(out) < len(df):
+        print(f"[dedupe] dropped {len(df) - len(out):,} duplicate player-game rows")
+    return out

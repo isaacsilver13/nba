@@ -141,6 +141,9 @@ DENY_EXACT = {
     # Leakage: computed by a prior model run
     "abs_edge", "edge_rank_today", "edge_percentile_last_30_days",
     "model_error_roll_last20",
+    # Leakage: same-game DNPs (boxscore minutes == 0), despite the "last_game" names. "Coach's Decision" DNPs
+    # depend on game flow (corr -0.42 with |margin|), which leaks the ATS result. Inactives alone carry no signal.
+    "minutes_lost_last_game", "usage_lost_last_game", "missing_top1_flag", "missing_top2_flag",
     # Redundant Elo monotonic transforms (trees find nonlinearity natively)
     "abs_elo_diff", "elo_diff_squared", "sigmoid_elo_diff",
     # Manual interactions (trees find these automatically)
@@ -191,9 +194,9 @@ STATIC_FEATURES = [
     "margin_std_last_10", "home_margin_std_last_10", "away_margin_std_last_10",
     # Schedule load
     "top8_points_diff",
-    # Injury / roster
-    "missing_top1_flag", "missing_top2_flag",
-    "minutes_lost_last_game", "usage_lost_last_game",
+    # Injury / roster (pregame-known absences only; see docs/feature-leakage-audit-and-fix-plan.md)
+    "pregame_missing_top1", "pregame_missing_top2",
+    "pregame_minutes_out", "pregame_usage_out", "prev_game_minutes_out",
     # Ratings (short-window, non-dynamic)
     "bench_net_rating_last_5",
     "off_rating_last_5", "def_rating_last_5",
@@ -345,7 +348,8 @@ def read_odds() -> pd.DataFrame:
     odds["away"] = odds["away_team"].map(CITY_TO_ABBR)
     odds["home_american"] = pd.to_numeric(odds["spread_home_odds"], errors="coerce")
     odds["away_american"] = pd.to_numeric(odds["spread_away_odds"], errors="coerce")
-    return odds[["date", "home", "away", "home_american", "away_american"]]
+    odds["book_spread"] = -pd.to_numeric(odds["spread_home_points"], errors="coerce")  # home margin the line implies
+    return odds[["date", "home", "away", "home_american", "away_american", "book_spread"]]
 
 
 def load_data() -> pd.DataFrame:
@@ -386,15 +390,22 @@ def load_data() -> pd.DataFrame:
         odds_gid = odds_gid.drop_duplicates("GAME_ID_KEY", keep="last")
 
         df = df.merge(
-            odds_gid[["GAME_ID_KEY", "home_american", "away_american"]],
+            odds_gid[["GAME_ID_KEY", "home_american", "away_american", "book_spread"]],
             on="GAME_ID_KEY", how="left",
         )
     else:
         df["home_american"] = np.nan
         df["away_american"] = np.nan
+        df["book_spread"] = np.nan
 
     # Only games with BOTH real prices are bettable; mirrored/defaulted prices are not market observations
     df["odds_matched"] = df["home_american"].notna() & df["away_american"].notna()
+
+    # Two closing-line sources (Kaggle/SBR in the feature table, BetMGM in all_odds.csv): the model sees their
+    # average (halves book-specific noise); bets are priced AND settled on the BetMGM line (one book, one line).
+    df["spread_kaggle"] = pd.to_numeric(df["spread_signed"], errors="coerce")
+    df["settle_signed"] = (-df["book_spread"]).fillna(df["spread_kaggle"])
+    df["spread_signed"] = ((df["spread_kaggle"] + df["settle_signed"]) / 2).where(df["book_spread"].notna(), df["spread_kaggle"])
 
     # Mirror / default missing prices
     m_h = df["home_american"].isna() & df["away_american"].notna()
@@ -529,9 +540,10 @@ def compute_roi(preds_df: pd.DataFrame, detail: bool = False):
         scale = scale.reindex(df.index).fillna(1.0)
         df.loc[selected, "_kelly"] *= scale
 
-    did_home_cover = df["home_margin"].values > -df["spread_signed"].values
+    settle = df["settle_signed"].values if "settle_signed" in df.columns else df["spread_signed"].values
+    did_home_cover = df["home_margin"].values > -settle
     covered = np.where(did_home_cover, "HOME", "AWAY")
-    push = df["home_margin"].values == -df["spread_signed"].values
+    push = df["home_margin"].values == -settle
     covered = np.where(push, "PUSH", covered)  # books refund pushes: pnl 0
 
     pnl = np.zeros(len(df))
@@ -583,10 +595,11 @@ def calibrate_sigma(out: pd.DataFrame) -> tuple:
     Each fold's sigma is scaled by the multiplier (>= 1) that best fits cover outcomes in EARLIER folds only,
     so win_prob = norm.cdf(edge / sigma) is calibrated without peeking. Returns (sigma, {fold: multiplier})."""
     edge = (out["pred_ensemble"] + out["spread_signed"]).values
-    cover = (out["home_margin"].values > -out["spread_signed"].values).astype(float)
+    settle = (out["settle_signed"] if "settle_signed" in out.columns else out["spread_signed"]).values
+    cover = (out["home_margin"].values > -settle).astype(float)
     sig = out["sigma_ensemble"].values
     fold = out["fold"].values
-    push = out["home_margin"].values == -out["spread_signed"].values
+    push = out["home_margin"].values == -settle
     ok = np.isfinite(edge) & np.isfinite(sig) & np.isfinite(cover) & ~push
     cal, mults = sig.copy(), {}
     for f in np.unique(fold):
@@ -676,7 +689,7 @@ def run_experiment() -> dict:
         [pred_store[s["id"]] for s in MODEL_SPECS], axis=1
     ).notna().any(axis=1)
     out = df.loc[covered_mask, [
-        "GAME_DATE", "home_margin", "spread_signed",
+        "GAME_DATE", "home_margin", "spread_signed", "settle_signed",
         "payout_home", "payout_away", "odds_matched",
     ]].copy()
 

@@ -128,6 +128,45 @@ def _map_style_labels(centroids, feature_cols):
     return label_map, id_map
 
 
+def _prior_style_map(df, date_col, style_cols, min_games=5, min_teams=8):
+    """Team style ids per (season, month) using only games played BEFORE that month.
+
+    A team with fewer than `min_games` earlier games this season falls back to its previous-season averages; with
+    no usable history it gets no row (style id 0 after the merge). Clusters are refit each month, so a game's style
+    never depends on its own or any later result.
+    """
+    d = df[["team", "season", date_col] + style_cols].copy()
+    d["month"] = d[date_col].dt.to_period("M")
+    season_avgs = {s: g.groupby("team")[style_cols].mean() for s, g in d.groupby("season")}
+    frames = []
+    for season, gs in d.groupby("season", sort=True):
+        prev = season_avgs.get(season - 1)
+        for month in sorted(gs["month"].dropna().unique()):
+            past = gs[gs[date_col] < month.to_timestamp()]
+            counts = past.groupby("team").size()
+            cur = past.groupby("team")[style_cols].mean()
+            rows = {}
+            for team in gs["team"].unique():
+                if counts.get(team, 0) >= min_games:
+                    rows[team] = cur.loc[team]
+                elif prev is not None and team in prev.index:
+                    rows[team] = prev.loc[team]
+            if len(rows) < min_teams:
+                continue
+            avg = pd.DataFrame(rows).T
+            X = avg[style_cols].values
+            X = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-6)
+            labels, centroids = _kmeans_numpy(X, k=4, seed=42)
+            _, id_map = _map_style_labels(centroids, style_cols)
+            frames.append(pd.DataFrame({
+                "season": season, "month": month, "team": avg.index,
+                "style_id": [id_map.get(l, 2) for l in labels],
+            }))
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
+        columns=["season", "month", "team", "style_id"]
+    )
+
+
 def run(config=None, inputs=None):
     """Run step 6 to compute rolling, EWMA, and style features.
 
@@ -162,19 +201,20 @@ def run(config=None, inputs=None):
     if inputs and "team_opp_stats" in inputs:
         df = inputs["team_opp_stats"].copy()
     else:
-        df = pd.read_csv(paths["input_team_opp"])
+        df = pd.read_csv(paths["input_team_opp"], dtype={"GAME_ID": str})
 
     if inputs and "df_model_with_travel" in inputs:
         df_model = inputs["df_model_with_travel"].copy()
     else:
-        df_model = pd.read_csv(paths["input_model"])
+        df_model = pd.read_csv(paths["input_model"], dtype={"GAME_ID": str})
 
     print(f"[step6] team_opp_stats rows: {len(df):,}")
     print(f"[step6] df_model_with_travel rows: {len(df_model):,}")
 
     # Ensure GAME_ID is string for consistent merging
-    df["GAME_ID"] = df["GAME_ID"].astype(str)
-    df_model["GAME_ID"] = df_model["GAME_ID"].astype(str)
+    # one canonical 10-digit id on both sides (a CSV round trip can drop the leading zeros)
+    df["GAME_ID"] = df["GAME_ID"].astype(str).str.replace(".0", "", regex=False).str.zfill(10)
+    df_model["GAME_ID"] = df_model["GAME_ID"].astype(str).str.replace(".0", "", regex=False).str.zfill(10)
 
     merge_cols = ["GAME_ID", "home", "away", "season"]
     date_col = "date_x" if "date_x" in df_model.columns else ("date" if "date" in df_model.columns else None)
@@ -247,22 +287,7 @@ def run(config=None, inputs=None):
 
     # Team style clustering (full season averages)
     style_cols = ["pace", "three_pa_rate", "paint_points", "rebound_rate", "net_rebounds", "net_three_pa"]
-    style_map_frames = []
-    for season, g in df.groupby("season", sort=False):
-        season_avg = g.groupby("team", as_index=False)[style_cols].mean()
-        X = season_avg[style_cols].values
-        X = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-6)
-        labels, centroids = _kmeans_numpy(X, k=4, seed=42)
-        label_map, id_map = _map_style_labels(centroids, style_cols)
-
-        season_avg["style_label"] = [label_map.get(l, "Slow defensive") for l in labels]
-        season_avg["style_id"] = [id_map.get(l, 2) for l in labels]
-        season_avg["season"] = season
-        style_map_frames.append(season_avg[["season", "team", "style_label", "style_id"]])
-
-    style_map = pd.concat(style_map_frames, ignore_index=True) if style_map_frames else pd.DataFrame(
-        columns=["season", "team", "style_label", "style_id"]
-    )
+    style_map = _prior_style_map(df, date_col, style_cols)
 
     df_home = df[df["is_home"] == 1].copy()
     df_away = df[df["is_home"] == 0].copy()
@@ -282,16 +307,17 @@ def run(config=None, inputs=None):
 
     df_model = df_model.merge(df_game_from_df, on="GAME_ID", how="left")
 
+    df_model["_month"] = pd.to_datetime(df_model[date_col]).dt.to_period("M")
     df_model = df_model.merge(
-        style_map.rename(columns={"team": "home", "style_id": "home_style_id"}),
-        on=["season", "home"],
+        style_map.rename(columns={"team": "home", "style_id": "home_style_id", "month": "_month"}),
+        on=["season", "_month", "home"],
         how="left",
     )
     df_model = df_model.merge(
-        style_map.rename(columns={"team": "away", "style_id": "away_style_id"}),
-        on=["season", "away"],
+        style_map.rename(columns={"team": "away", "style_id": "away_style_id", "month": "_month"}),
+        on=["season", "_month", "away"],
         how="left",
-    )
+    ).drop(columns="_month")
 
     df_model["home_style_id"] = pd.to_numeric(df_model["home_style_id"], errors="coerce").fillna(0).astype(int)
     df_model["away_style_id"] = pd.to_numeric(df_model["away_style_id"], errors="coerce").fillna(0).astype(int)
@@ -302,8 +328,9 @@ def run(config=None, inputs=None):
     df_model["def_rating_last_5"] = df_model.get("home_team_def_rating_r5", 0) - df_model.get("away_team_def_rating_r5", 0)
     df_model["net_rating_last_5"] = df_model.get("home_team_net_rating_r5", 0) - df_model.get("away_team_net_rating_r5", 0)
 
-    home_net_trend = df_model.get("home_team_net_rating_r5", 0) - df_model.get("home_team_net_rating_r15", 0)
-    away_net_trend = df_model.get("away_team_net_rating_r5", 0) - df_model.get("away_team_net_rating_r15", 0)
+    # windows are 5/10/20 (there is no r15, which silently made this feature a duplicate of net_rating_last_5)
+    home_net_trend = df_model.get("home_team_net_rating_r5", 0) - df_model.get("home_team_net_rating_r20", 0)
+    away_net_trend = df_model.get("away_team_net_rating_r5", 0) - df_model.get("away_team_net_rating_r20", 0)
     df_model["net_rating_trend"] = home_net_trend - away_net_trend
 
     home_pace = df_model.get("home_team_pace_r5", 0)
@@ -312,7 +339,8 @@ def run(config=None, inputs=None):
     df_model["combined_pace"] = home_pace + away_pace
     df_model["pace_interaction"] = home_pace * away_pace
 
-    df_model["net_rating_diff"] = df_model.get("home_team_net_rating_r5", 0) - df_model.get("away_team_net_rating_r5", 0)
+    # 10-game net rating gap (net_rating_last_5 is the 5-game one; they used to be identical columns)
+    df_model["net_rating_diff"] = df_model.get("home_team_net_rating_r10", 0) - df_model.get("away_team_net_rating_r10", 0)
 
     df_model["rest_diff_elo_diff"] = df_model.get("rest_diff", 0) * df_model.get("elo_diff", 0)
     df_model["home_elo_roll_2Y_rest_advantage"] = df_model.get("home_elo_roll_2Y", 0) * df_model.get("rest_advantage", 0)

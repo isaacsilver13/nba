@@ -8,12 +8,12 @@ import pandas as pd
 try:
     # When imported as a package module
     from ..config import get_config, resolve_step_config
-    from ..helpers import load_cached_output, save_output
+    from ..helpers import dedupe_player_games, load_cached_output, save_output
 except ImportError:
     # When loaded dynamically or as direct import
     try:
         from ingest.dataPrep.config import get_config, resolve_step_config
-        from ingest.dataPrep.helpers import load_cached_output, save_output
+        from ingest.dataPrep.helpers import dedupe_player_games, load_cached_output, save_output
     except ImportError:
         # Fallback for different import contexts
         import sys
@@ -22,7 +22,7 @@ except ImportError:
         if parent_dir not in sys.path:
             sys.path.insert(0, parent_dir)
         from config import get_config, resolve_step_config
-        from helpers import load_cached_output, save_output
+        from helpers import dedupe_player_games, load_cached_output, save_output
 
 
 def run(config=None, inputs=None):
@@ -96,6 +96,8 @@ def run(config=None, inputs=None):
 
     if "team" in df_boxscores.columns:
         df_boxscores["team"] = df_boxscores["team"].astype(str).str.upper().str.strip()
+
+    df_boxscores = dedupe_player_games(df_boxscores)  # duplicated player-games would be summed into team totals
 
     numeric_cols = [
         "points",

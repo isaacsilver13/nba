@@ -129,6 +129,18 @@ def _coerce_join_keys(df, keys):
     return out
 
 
+def _require_unique(df, keys, label):
+    """Fail loudly if a consolidated table has more than one row per key.
+
+    A family frame with repeated keys used to multiply rows (16x / 32x) in the merges below; such a table must
+    never be written, because every downstream sum and rolling window would silently double count.
+    """
+    keys = [k for k in keys if k in df.columns]
+    dup = int(df.duplicated(keys).sum()) if keys and not df.empty else 0
+    if dup:
+        raise ValueError(f"{label}: {dup:,} rows repeat their {keys} key after merging endpoint families")
+
+
 def _build_cache_index(cache_dir, families):
     """Scan cache folders once and index game ids by family and kind."""
     index = {family: {"player": set(), "team": set()} for family in families}
@@ -195,6 +207,7 @@ def _rebuild_outputs_from_cache(game_ids_z, active_families, cache_dir, cache_in
             if not family_player_df.empty:
                 player_base = family_player_df.copy()
                 player_base = _coerce_join_keys(player_base, ["GAME_ID", "TEAM_ID", "PLAYER_ID"])
+                player_base = player_base.drop_duplicates(["GAME_ID", "TEAM_ID", "PLAYER_ID"], keep="first")
         else:
             if not family_player_df.empty:
                 keys = [k for k in ["GAME_ID", "TEAM_ID", "PLAYER_ID"] if k in family_player_df.columns]
@@ -228,6 +241,8 @@ def _rebuild_outputs_from_cache(game_ids_z, active_families, cache_dir, cache_in
             if merge_keys:
                 df_team = df_team.merge(team_df, on=merge_keys, how="outer")
 
+    _require_unique(df_player, ["GAME_ID", "TEAM_ID", "PLAYER_ID"], "player boxscores")
+    _require_unique(df_team, ["GAME_ID", "TEAM_ID"], "team boxscores")
     return df_player, df_team
 
 
