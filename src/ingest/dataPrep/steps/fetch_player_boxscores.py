@@ -496,7 +496,9 @@ def run(config=None, inputs=None):
         game_ids_z=game_ids_z,
         active_families=active_families,
         cache_dir=str(cache_dir),
-        cache_index=cache_index,
+        # the index was built before the downloads above; re-scan if anything was fetched, or this run's new games
+        # would be left out of the consolidated tables
+        cache_index=None if games_to_process else cache_index,
     )
 
     if df_player.empty:

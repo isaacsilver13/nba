@@ -203,3 +203,35 @@ def test_usage_concentration_is_the_top_n_share_of_team_usage():
     out = agg.usage_concentration(d).set_index("team")
     assert np.isclose(out.loc["A", "usg_top2_share"], 0.80) and np.isclose(out.loc["A", "usg_top3_share"], 0.90)
     assert np.isclose(out.loc["B", "usg_top2_share"], 0.40) and np.isclose(out.loc["B", "usg_top3_share"], 0.60)
+
+
+def test_games_downloaded_in_this_run_reach_the_output_tables(tmp_path, monkeypatch):
+    # the cache index used to be built before downloading, so a run's newly fetched games were missing from its output
+    import types
+    for name in ("nba_api", "nba_api.stats", "nba_api.stats.library", "nba_api.stats.library.http"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    sys.modules["nba_api.stats"].endpoints = types.ModuleType("endpoints")
+    sys.modules["nba_api.stats.library.http"].NBAStatsHTTP = object
+    from ingest.dataPrep.config import get_config
+    from ingest.dataPrep.steps import fetch_player_boxscores as fetch
+
+    def fake_fetch(game_id, family, cache_dir, *a, **k):
+        gid = str(int(game_id)).zfill(10)
+        p = pd.DataFrame({"GAME_ID": gid, "TEAM_ID": [1, 2], "PLAYER_ID": [10, 20], "PTS": [5, 7]})
+        t = pd.DataFrame({"GAME_ID": gid, "TEAM_ID": [1, 2], "PTS": [5, 7]})
+        os.makedirs(os.path.join(cache_dir, family), exist_ok=True)
+        p.to_csv(os.path.join(cache_dir, family, f"{gid}_player.csv"), index=False)
+        t.to_csv(os.path.join(cache_dir, family, f"{gid}_team.csv"), index=False)
+        return p, t, False
+    monkeypatch.setattr(fetch, "fetch_endpoint_cached", fake_fetch)
+    monkeypatch.setattr(fetch.time, "sleep", lambda s: None)
+
+    pd.DataFrame({"GAME_ID": ["0022500001"], "date": ["2025-10-21"]}).to_csv(tmp_path / "games.csv", index=False)
+    cfg = get_config({"cache": {"write_outputs": False}, "steps": {"step3": {
+        "paths": {"input_games": str(tmp_path / "games.csv"), "cache_dir": str(tmp_path / "cache"),
+                  "output_players": str(tmp_path / "p.csv"), "output_team_v3": str(tmp_path / "t.csv"),
+                  "failed_games": str(tmp_path / "f.csv")},
+        "endpoint_families": {"advanced": False, "four_factors": False, "scoring": False, "usage": False,
+                              "misc": False, "player_track": False}}}})
+    out = fetch.run(cfg)
+    assert set(out["player_boxscores"]["GAME_ID"]) == {"0022500001"}

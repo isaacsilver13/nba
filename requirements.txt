@@ -8,4 +8,4 @@ xgboost==3.4.1
 streamlit==1.65.0
 plotly==7.1.0
 openai==3.24.0
-nba_api  # ingestion steps 1 and 3 only
+nba_api==1.11.4  # ingestion steps 1 and 3 and tools/fetch_holdout.py only
