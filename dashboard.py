@@ -24,7 +24,7 @@ OUTPUTS = outputs_dir(BASE_DIR)
 
 
 @st.cache_data
-def _runs(outputs: str, _stamp: float):
+def _runs(outputs: str, stamp: float):  # no underscore: Streamlit excludes "_"-prefixed args from the cache key
     return list_runs(Path(outputs))
 
 
@@ -88,7 +88,7 @@ T = load_tables(str(run.run_dir), (run.run_dir / "manifest.json").stat().st_mtim
 def need_complete():
     if run is None:
         st.info("No run selected.")
-    else:
+    elif not ok:
         st.warning(f"Run `{run.run_id}` is **{run.status}**; charts are disabled. See Run Health.")
     return ok
 
