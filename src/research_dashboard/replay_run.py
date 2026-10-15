@@ -100,7 +100,7 @@ def build_artifacts(df, test_in, fold_of, detail, raw, default_odds, out_dir: Pa
     paths = {}
     for name, frame in {"fold_metrics": pd.DataFrame(folds), "predictions": pred, "bets": bets, "odds_audit": audit}.items():
         paths[name] = out_dir / f"{name}.csv"
-        frame.to_csv(paths[name], index=False)
+        frame.to_csv(paths[name], index=False, lineterminator="\n")  # LF so manifest hashes match across OSes
     paths["metrics"] = out_dir / "metrics.json"
     paths["metrics"].write_text(json.dumps({
         **metrics, "compound_roi": float(book[-1] - 1.0) if len(book) else 0.0,

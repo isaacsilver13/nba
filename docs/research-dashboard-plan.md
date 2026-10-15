@@ -1,6 +1,6 @@
 # NBA Prediction — Research Dashboard Handoff
 
-Status: draft
+Status: implemented (run Health, Model Quality, Odds Quality, Betting Simulation, Experiment Log, Legacy toggle); verified on the synthetic sample run. A real captured run (`replay_run`) is still pending.
 
 Scope: `repos/nba_prediction` only. This is a local, research-only Streamlit dashboard; it is not a live picks product and must not call external data APIs.
 

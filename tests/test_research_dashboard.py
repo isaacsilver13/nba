@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -104,3 +105,9 @@ def test_fold_sharing_a_boundary_day_is_ok(tmp_path):
     f.loc[1, "test_start"] = f.loc[0, "test_end"]
     f.to_csv(src["fold_metrics"], index=False)
     assert load_manifest(capture("r1", src, tmp_path / "out")).status == "complete"
+
+
+def test_committed_sample_run_is_complete():
+    """The checked-in fixture must verify on every OS (guards against CRLF/LF hash drift)."""
+    run = load_manifest(Path(__file__).resolve().parents[1] / "data" / "sample" / "research_runs" / "sample_complete")
+    assert run.status == "complete", run.problems

@@ -1,27 +1,27 @@
 {
   "schema_version": 1,
   "run_id": "sample_complete",
-  "created_at": "2026-10-06T07:21:44+00:00",
+  "created_at": "2026-10-15T20:03:09+00:00",
   "status": "complete",
   "artifacts": {
     "fold_metrics": {
       "path": "fold_metrics.csv",
-      "sha256": "53dab91062c0e5370ef480c2e39c37d7bd514325d9c75d8fae0d3290d985b0bd",
+      "sha256": "06115fb1bdd9101fff17b9dc80ae0cc2b5e5bf0f6c2841c8423e628bf272f0fd",
       "rows": 3
     },
     "predictions": {
       "path": "predictions.csv",
-      "sha256": "1b599127f1a8cdbd1bc3ef4909e6daa52f3b3fb08372aee3ce9780e6d4942c68",
+      "sha256": "7c0475b4c8329c206303416b90b28a61a16b0520554113e6187178a69781c2bd",
       "rows": 240
     },
     "bets": {
       "path": "bets.csv",
-      "sha256": "e932b0eba87ad8ef7e283d38ce62c31a8b2fb14f4f6f189fadc57567dad68f07",
+      "sha256": "12e367c2212920438e7f827769ef7bf38b67c9618720b7d5d0de419b0713bc7e",
       "rows": 60
     },
     "odds_audit": {
       "path": "odds_audit.csv",
-      "sha256": "89a792242a958a2909298ecfd4a749721acc83d3e9ea79376b79debb939b8c2e",
+      "sha256": "b677db6d4704afdd21c58746bc4a740a5852e49220fa3a8a078b0bb5b853cb3e",
       "rows": 240
     },
     "metrics": {
