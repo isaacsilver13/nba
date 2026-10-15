@@ -14,7 +14,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.research_dashboard.catalog import legacy_entry, list_runs, outputs_dir
-from src.research_dashboard.manifest import ODDS_TIERS
+from src.research_dashboard.manifest import ODDS_TIERS, safe_path
 from src.research_dashboard.views import bet_summary, filter_tiers, reliability
 
 st.set_page_config(page_title="NBA Research Dashboard", page_icon="🏀", layout="wide")
@@ -61,6 +61,17 @@ def load_results() -> pd.DataFrame:
     return df
 
 
+def artifact_table(run) -> pd.DataFrame:
+    rows = {}
+    for name, e in run.data.get("artifacts", {}).items():
+        try:
+            mtime = pd.Timestamp(safe_path(run.run_dir, e["path"]).stat().st_mtime, unit="s").strftime("%Y-%m-%d %H:%M")
+        except (OSError, ValueError, KeyError):
+            mtime = "missing"
+        rows[name] = {"path": e.get("path"), "rows": e.get("rows"), "sha256": str(e.get("sha256"))[:12], "modified": mtime}
+    return pd.DataFrame(rows).T
+
+
 # ── Global controls ───────────────────────────────────────────────────────────
 st.title("🏀 NBA Research Dashboard")
 st.caption("Historical research results. Not betting advice or live picks.")
@@ -70,10 +81,10 @@ if st.sidebar.button("Refresh"):
 include_legacy = st.sidebar.toggle("Include legacy / unbundled data", value=False)
 
 runs = _runs(str(OUTPUTS), _stamp())
-tabs = ["Run Health", "Model Quality", "Odds Quality", "Betting Simulation", "Experiment Log"]
+tabs = ["Run Health", "Model Quality", "Odds Quality", "Betting Simulation", "Artifacts", "Experiment Log"]
 if include_legacy:
     tabs.append("Legacy / unbundled")
-t_health, t_model, t_odds, t_bets, t_log, *t_legacy = st.tabs(tabs)
+t_health, t_model, t_odds, t_bets, t_art, t_log, *t_legacy = st.tabs(tabs)
 
 run = None
 if runs:
@@ -107,8 +118,13 @@ with t_health:
         if run.data.get("folds"):
             st.subheader("Fold test windows")
             st.dataframe(pd.DataFrame(run.data["folds"]), use_container_width=True)
+        if ok:
+            g = T["predictions"]["game_date"]
+            st.caption(f"Data coverage: {len(g):,} test games, {g.min()} to {g.max()}; "
+                       f"{len(T['bets']):,} bets across all odds tiers.")
         st.subheader("Artifacts")
-        st.dataframe(pd.DataFrame(run.data.get("artifacts", {})).T, use_container_width=True)
+        st.dataframe(artifact_table(run), use_container_width=True)
+        st.caption("Modified = file mtime on disk. A checksum mismatch makes the run partial.")
         st.download_button("Download manifest.json", json.dumps(run.data, indent=2), f"{run.run_id}_manifest.json")
 
 if need_complete():
@@ -169,6 +185,13 @@ if need_complete():
             exp = b.groupby("game_date")["kelly_fraction"].sum().reset_index()
             r.plotly_chart(px.bar(exp, x="game_date", y="kelly_fraction", title="Daily exposure"),
                            use_container_width=True)
+
+with t_art:
+    if need_complete():
+        st.caption("Tables behind every number in this run. Downloads are the manifest-declared files, unfiltered.")
+        for name, e in run.data["artifacts"].items():
+            f = safe_path(run.run_dir, e["path"])
+            st.download_button(f"Download {e['path']}", f.read_bytes(), f"{run.run_id}_{e['path']}", key=f"dl_{name}")
 
 with t_log:
     st.caption("Experiment log from results.tsv. These rows are NOT results of the selected run.")
