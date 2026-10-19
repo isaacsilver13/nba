@@ -12,12 +12,16 @@ def bet_summary(bets: pd.DataFrame) -> dict:
     """Units are fractions of starting bankroll; ROI = P&L / total staked."""
     if bets.empty:
         return {"bets": 0}
-    bk = bets.sort_values("game_date")["bankroll"]
+    bk = bets.sort_values("game_date", kind="stable")["bankroll"]
+    opening = bets["bankroll_open"] if "bankroll_open" in bets else 1.0
+    stakes = bets["kelly_fraction"] * opening
+    profits = bets["pnl"] * opening
+    peaks = np.maximum.accumulate(np.r_[1.0, bk.to_numpy()])[1:]
     return {
         "bets": len(bets),
         "win_rate": bets["win"].mean(),
-        "roi": bets["pnl"].sum() / bets["kelly_fraction"].sum(),
-        "max_drawdown": float(((bk.cummax() - bk) / bk.cummax()).max()),
+        "roi": profits.sum() / stakes.sum() if stakes.sum() else 0.0,
+        "max_drawdown": float(np.max((peaks - bk.to_numpy()) / peaks)),
     }
 
 

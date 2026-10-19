@@ -78,7 +78,8 @@ def build_artifacts(df, test_in, fold_of, detail, raw, default_odds, out_dir: Pa
     audit = pd.DataFrame({"game_id": d["GAME_ID_KEY"], "game_date": date, "odds_tier": tier})
 
     sel = np.asarray(detail["selected"], dtype=bool)
-    book = np.cumprod(1.0 + d["pnl"].values)
+    book = np.asarray(detail["bankroll_series"])
+    opening = np.asarray(detail["bankroll_open"])
     s = d[sel]
     home = s["_bet_side"] == "HOME"
     prob = np.where(home, s["win_prob"], 1 - s["win_prob"])
@@ -88,6 +89,7 @@ def build_artifacts(df, test_in, fold_of, detail, raw, default_odds, out_dir: Pa
         "odds_tier": tier[sel], "prob": np.round(prob, 6), "edge": np.round(prob * payout - (1 - prob), 6),
         "kelly_fraction": s["_kelly"].round(6), "win": (s["covered"] == s["_bet_side"]).astype(int),
         "pnl": s["pnl"].round(6), "bankroll": np.round(book[sel], 6),
+        "bankroll_open": np.round(opening[sel], 6),
     })
 
     folds = []
@@ -104,7 +106,8 @@ def build_artifacts(df, test_in, fold_of, detail, raw, default_odds, out_dir: Pa
     paths["metrics"] = out_dir / "metrics.json"
     paths["metrics"].write_text(json.dumps({
         **metrics, "compound_roi": float(book[-1] - 1.0) if len(book) else 0.0,
-        "units": "kelly_fraction and pnl are fractions of the CURRENT bankroll; bankroll starts at 1.0, compounds in date order",
+        "units": "kelly_fraction and pnl are fractions of day-opening bankroll; bankroll settles once per day",
+        "settlement": "day-opening-v1",
         "rmse_scope": "fold rmse/mae are ensemble errors on home_margin",
         "prob_meaning": "P(home covers spread) per experiment.compute_roi; home_win = home covered"}, indent=2))
     return paths

@@ -133,6 +133,9 @@ CITY_TO_ABBR = {
 }
 
 DENY_EXACT = {
+    # Not timestamped before tipoff: current-game participation and closing lines.
+    "minutes_lost_last_game", "usage_lost_last_game",
+    "missing_top1_flag", "missing_top2_flag", "spread_signed", "is_home_favorite",
     # Targets
     "home_margin", "away_margin",
     # Result labels
@@ -441,7 +444,8 @@ def build_features(df: pd.DataFrame) -> list:
         features.append(c)
 
     for c in EXTRA_FEATURE_INCLUSIONS:
-        if c in df.columns and c not in features:
+        if (c in df.columns and c not in features and c not in deny
+                and not any(tok in c.lower() for tok in DENY_SUBSTRINGS)):
             features.append(c)
 
     return sorted(set(features))
@@ -450,16 +454,29 @@ def build_features(df: pd.DataFrame) -> list:
 # ── CV splits ────────────────────────────────────────────────────────────────
 
 def walk_forward_splits(df, time_col, train_size, test_size):
-    """Walk-forward generator. FROZEN."""
-    df = df.sort_values(time_col, kind="stable").reset_index(drop=True)
-    start = 0
-    while True:
-        train_end = start + train_size
-        test_end = train_end + test_size
-        if test_end > len(df):
-            break
-        yield df.iloc[start:train_end].copy(), df.iloc[train_end:test_end].copy()
-        start += test_size
+    """Whole-date chronological folds; sizes are minimum row targets.
+
+    Training windows include the full boundary date and test blocks never overlap.
+    Keep original row indices for prediction assignment. Include a final partial
+    test block rather than silently discarding the newest games.
+    """
+    if train_size <= 0 or test_size <= 0:
+        raise ValueError("train_size and test_size must be positive")
+    dates = pd.to_datetime(df[time_col], errors="coerce").dt.normalize()
+    if dates.isna().any():
+        raise ValueError("Walk-forward rows require valid game dates")
+    ordered = df.assign(_fold_day=dates).sort_values("_fold_day", kind="stable")
+    days = ordered["_fold_day"].to_numpy()
+    boundaries = np.r_[0, np.flatnonzero(days[1:] != days[:-1]) + 1, len(ordered)]
+    boundaries = np.unique(boundaries)
+    test_start = int(boundaries[np.searchsorted(boundaries, train_size)]) if train_size <= len(ordered) else len(ordered)
+    while test_start < len(ordered):
+        train_start = int(boundaries[max(0, np.searchsorted(boundaries, test_start - train_size, side="right") - 1)])
+        end_index = min(np.searchsorted(boundaries, test_start + test_size), len(boundaries) - 1)
+        test_end = int(boundaries[end_index])
+        yield (ordered.iloc[train_start:test_start].drop(columns="_fold_day").copy(),
+               ordered.iloc[test_start:test_end].drop(columns="_fold_day").copy())
+        test_start = test_end
 
 
 # ── ROI computation ───────────────────────────────────────────────────────────
@@ -470,6 +487,7 @@ def compute_roi(preds_df: pd.DataFrame, detail: bool = False):
     detail=True returns the per-row selection/pnl pieces instead of the ROI float."""
     df = preds_df.sort_values("GAME_DATE", kind="stable").reset_index(drop=True)
 
+    df["_bet_day"] = pd.to_datetime(df["GAME_DATE"]).dt.normalize()
     edge = df["pred_ensemble"] + df["spread_signed"]
     sigma = df["sigma_ensemble"].replace(0, np.nan).fillna(1.0)
     win_prob = norm.cdf(edge / sigma)
@@ -513,7 +531,7 @@ def compute_roi(preds_df: pd.DataFrame, detail: bool = False):
     if is_bet.any():
         df.loc[is_bet, "_rank"] = (
             df.loc[is_bet]
-            .groupby("GAME_DATE")["_edge_abs"]
+            .groupby("_bet_day")["_edge_abs"]
             .rank(method="first", ascending=False)
         )
     selected = is_bet & (df["_rank"] <= TOP_N_BETS_PER_DAY)
@@ -522,7 +540,7 @@ def compute_roi(preds_df: pd.DataFrame, detail: bool = False):
     if selected.any():
         daily_exp = (
             df.loc[selected, "_kelly"]
-            .groupby(df.loc[selected, "GAME_DATE"])
+            .groupby(df.loc[selected, "_bet_day"])
             .transform("sum")
         )
         scale = (DAILY_MAX_EXPOSURE / daily_exp).clip(upper=1.0)
@@ -547,12 +565,18 @@ def compute_roi(preds_df: pd.DataFrame, detail: bool = False):
         else:
             pnl[i] = k * pa.iloc[i] if won else -k
 
-    bankroll = 1.0
-    for p in pnl:
-        bankroll *= (1.0 + p)
+    # All same-day stakes use the same opening bankroll. Settle their sum once.
+    daily_pnl = pd.Series(pnl, index=df.index).groupby(df["_bet_day"]).sum()
+    day_end = (1.0 + daily_pnl).cumprod()
+    day_open = day_end.shift(1, fill_value=1.0)
+    bankroll_series = df["_bet_day"].map(day_end).to_numpy()
+    bankroll_open = df["_bet_day"].map(day_open).to_numpy()
+    bankroll = float(day_end.iloc[-1]) if len(day_end) else 1.0
 
     if detail:
-        return dict(df=df, pnl=pnl, selected=selected, win_prob=win_prob, covered=covered, bankroll=bankroll)
+        return dict(df=df, pnl=pnl, selected=selected, win_prob=win_prob, covered=covered,
+                    bankroll=bankroll, bankroll_series=bankroll_series, bankroll_open=bankroll_open,
+                    settlement="day-opening-v1")
     return float(bankroll - 1.0)
 
 
