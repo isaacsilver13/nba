@@ -86,3 +86,20 @@ Note `p_home` is P(home covers the spread) as `compute_roi` defines it, not P(ho
 
 Forward-only NBA odds snapshots (props, 1H/quarter lines, moneylines) are collected by
 `src/odds_collector` on GitHub Actions — setup and operations in [docs/odds-collector.md](docs/odds-collector.md).
+
+
+## Causal evaluation and settlement
+
+The top-player feature uses a previous complete team-date snapshot, including
+roster membership. It is deliberately one team-date behind the per-player rolling
+stats; target-game participants cannot affect it. Untimestamped absence features
+and closing-line features are frozen exclusions, including explicit inclusions.
+Rebuild processed features and revalidate before relying on old scores. Folds
+round minimum row targets to complete dates, preserve row identity and include
+the final partial test block. Same-day bets use one opening bankroll and settle
+together. Replay records `day-opening-v1` and `bankroll_open`; older bundles keep
+their original provenance. Autorun accepts validated literals and allowlisted
+constructors with bounded workers/model parameters, ten iterations by default
+and a maximum 1800-second per-experiment timeout. Environment credentials are preferred; legacy token-file fallback is loaded only
+for an explicit live invocation. Importing the runner does not read token files. Fixture
+tests need no API calls or model training.

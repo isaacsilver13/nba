@@ -24,6 +24,24 @@ except ImportError:
         from helpers import load_cached_output, save_output, parse_absence_reason, normalize_status
 
 
+def historical_top_player_features(players, top_n):
+    """Lag the whole team snapshot, including membership, by a complete date.
+
+    Lagging individual stats alone still lets a target-game boxscore reveal who
+    was on that game's roster. Use the previous observed team-date snapshot.
+    """
+    players = players.assign(_day=pd.to_datetime(players["date"]).dt.normalize())
+    keys = players[["GAME_ID", "team", "_day"]].drop_duplicates()
+    ranked = players.sort_values(
+        ["player_minutes_played_r5", "PLAYER_ID"], ascending=[False, True], kind="stable"
+    ).groupby(["GAME_ID", "team"]).head(top_n)
+    column = f"top{top_n}_points_r5"
+    daily = ranked.groupby(["team", "_day"], as_index=False)["player_points_r5"].mean()
+    daily = daily.sort_values(["team", "_day"], kind="stable")
+    daily[column] = daily.groupby("team")["player_points_r5"].shift(1)
+    return keys.merge(daily[["team", "_day", column]], on=["team", "_day"]).drop(columns="_day")
+
+
 def normalize_status(s):
     """Normalize a raw player status string.
 
@@ -542,15 +560,7 @@ def run(config=None, inputs=None):
 
     top_n = rolling_cfg.get("top_n_players", 8)
 
-    team_features = (
-        df_players[df_players["did_play"]]
-        .sort_values("minutes_played", ascending=False)
-        .groupby(["GAME_ID", "team"])
-        .head(top_n)
-        .groupby(["GAME_ID", "team"], as_index=False)["player_points_r5"]
-        .mean()
-        .rename(columns={"player_points_r5": f"top{top_n}_points_r5"})
-    )
+    team_features = historical_top_player_features(df_players, top_n)
 
     home_feats = team_features.rename(
         columns={"team": "home", f"top{top_n}_points_r5": f"home_top{top_n}_points_r5"}

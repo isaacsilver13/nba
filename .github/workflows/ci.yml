@@ -16,12 +16,10 @@ jobs:
           python-version: '3.12'
       - name: Compile Python modules
         run: python -m compileall -q .
-      - name: Install autorun dependencies
-        run: pip install openai
+      - name: Install fixture-test dependencies
+        run: pip install -r requirements.txt pytest
       - name: Check autoresearch paths
         run: |
           python -c "import autorun; assert autorun.REPO_ROOT == __import__('pathlib').Path.cwd().resolve()"
-      - name: Odds collector tests
-        run: |
-          pip install pyarrow pytest
-          python -m pytest tests/test_odds_collector.py -q
+      - name: Model correctness and odds collector tests
+        run: python -m pytest tests -q

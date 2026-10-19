@@ -18,6 +18,9 @@ Requirements:
 """
 
 import argparse
+import ast
+
+from config_guard import validate_config
 import difflib
 import os
 import shutil
@@ -43,14 +46,12 @@ def _load_token_file(path: str) -> str:
 
 GITHUB_TOKEN = (
     os.environ.get("GITHUB_TOKEN")
-    or _load_token_file(r"%USERPROFILE%\.github_token")
     or ""
 )
 GITHUB_MODELS_BASE = "https://models.inference.ai.azure.com"
 
 GROQ_API_KEY = (
     os.environ.get("GROQ_API_KEY")
-    or _load_token_file(r"%USERPROFILE%\.github_token_groq.txt")
     or ""
 )
 GROQ_API_BASE  = "https://api.groq.com/openai/v1"
@@ -283,13 +284,7 @@ def call_agent(model_id: str, frozen_part: str, use_copilot: bool = False, use_g
     if frozen_idx != -1:
         raw = raw[:frozen_idx].rstrip()
 
-    # Validate all required variables are present
-    missing = [v for v in REQUIRED_CONFIG_VARS if v not in raw]
-    if missing:
-        raise ValueError(
-            f"Agent response is missing required config vars: {missing}. "
-            "Refusing to apply."
-        )
+    validate_config(raw)
 
     return raw.rstrip()
 
@@ -327,8 +322,8 @@ def save_snapshot(iteration: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="NBA Prediction Autoresearch Loop")
-    parser.add_argument("--max-iters", type=int, default=0,
-                        help="Maximum iterations (0 = unlimited)")
+    parser.add_argument("--max-iters", type=int, default=10,
+                         help="Maximum iterations (default: 10; must be positive)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Skip API call; run current experiment.py as baseline")
     parser.add_argument("--model", default="gpt-4o",
@@ -340,6 +335,15 @@ def main() -> None:
     parser.add_argument("--timeout", type=int, default=1800,
                         help="Per-experiment timeout in seconds (default: 1800)")
     args = parser.parse_args()
+    if args.max_iters <= 0 or not 1 <= args.timeout <= 1800:
+        parser.error("max-iters must be positive and timeout must be 1..1800 seconds")
+
+    global GITHUB_TOKEN, GROQ_API_KEY
+    if not args.dry_run:
+        if args.groq:
+            GROQ_API_KEY = GROQ_API_KEY or _load_token_file(r"%USERPROFILE%\.github_token_groq.txt")
+        else:
+            GITHUB_TOKEN = GITHUB_TOKEN or _load_token_file(r"%USERPROFILE%\.github_token")
 
     if not GITHUB_TOKEN and not args.dry_run and not args.groq:
         print(
@@ -349,6 +353,10 @@ def main() -> None:
             "  Or use --groq with GROQ_API_KEY (free at console.groq.com)"
         )
         sys.exit(1)
+
+    # Validate current source before running even a dry-run experiment.
+    _, current_config, _ = split_experiment(read_file(EXPERIMENT_FILE))
+    validate_config(current_config)
 
     # Save baseline snapshot (iteration 0)
     os.makedirs(EXPERIMENTS_DIR, exist_ok=True)
@@ -423,7 +431,9 @@ def main() -> None:
             tried_entry["diff_lines"] = config_diff_lines(current_config, new_config)
 
             # Reconstruct: immutable header + new config + original frozen code
+            validate_config(new_config)
             modified_code = immutable_header + "\n\n" + new_config + frozen_part
+            ast.parse(modified_code)
 
             # Sanity-check: frozen boundary must still be present
             if FROZEN_MARKER not in modified_code:
