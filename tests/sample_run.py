@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import pandas as pd
@@ -43,8 +44,8 @@ def write_sources(d: Path, seed: int = 0) -> dict:
     })
     bets["win"] = (rng.uniform(size=len(bets)) < bets["prob"]).astype(int)
     stake = bets["kelly_fraction"]
-    bets["pnl"] = np.where(bets["win"] == 1, stake * 0.91, -stake).round(5)  # units of starting bankroll
-    bets["bankroll"] = (1 + bets["pnl"].cumsum()).round(5)
+    bets["pnl"] = np.where(bets["win"] == 1, stake * 0.91, -stake).round(5)  # fraction of current bankroll
+    bets["bankroll"] = (1 + bets["pnl"]).cumprod().round(5)
 
     paths = {"fold_metrics": folds, "predictions": pred, "bets": bets, "odds_audit": audit}
     out = {}
@@ -53,16 +54,38 @@ def write_sources(d: Path, seed: int = 0) -> dict:
         df.to_csv(out[name], index=False, lineterminator="\n")  # LF so manifest hashes match across OSes
     out["metrics"] = d / "metrics.json"
     out["metrics"].write_text(json.dumps({"rmse": float(folds["rmse"].mean()), "mae": float(folds["mae"].mean()),
-                                          "n_folds": len(folds), "starting_bankroll": 1.0, "units": "fraction of starting bankroll"}))
+                                          "n_folds": len(folds), "starting_bankroll": 1.0,
+                                          "units": "kelly_fraction and pnl are fractions of the CURRENT bankroll"}))
     return out
 
 
-def make_run(outputs: Path, run_id: str, scratch: Path, seed: int = 0) -> Path:
-    return capture(run_id, write_sources(scratch, seed), outputs)
+SAMPLE_CREATED_AT = "2026-10-06T07:21:44+00:00"
+
+
+def make_run(outputs: Path, run_id: str, scratch: Path, seed: int = 0, created_at: str | None = None) -> Path:
+    return capture(run_id, write_sources(scratch, seed), outputs, created_at=created_at)
+
+
+def regenerate_committed_sample(root: Path) -> Path:
+    """Safely replace only the known synthetic fixture files; write the manifest last."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / "research_runs" / "sample_complete"
+    target.mkdir(parents=True, exist_ok=True)
+    filenames = ["fold_metrics.csv", "predictions.csv", "bets.csv", "odds_audit.csv", "metrics.json", "manifest.json"]
+    with TemporaryDirectory(dir=root) as temp:
+        temp_root = Path(temp)
+        generated = make_run(
+            temp_root / "generated",
+            "sample_complete",
+            temp_root / "sources",
+            created_at=SAMPLE_CREATED_AT,
+        )
+        for filename in filenames:
+            (generated / filename).replace(target / filename)
+    return target
 
 
 if __name__ == "__main__":
-    import tempfile
     root = Path(__file__).resolve().parents[1] / "data" / "sample"
-    with tempfile.TemporaryDirectory() as t:
-        print(make_run(root, "sample_complete", Path(t)))
+    print(regenerate_committed_sample(root))

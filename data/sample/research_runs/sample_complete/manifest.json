@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "run_id": "sample_complete",
-  "created_at": "2026-10-15T20:03:09+00:00",
+  "created_at": "2026-10-06T07:21:44+00:00",
   "status": "complete",
   "artifacts": {
     "fold_metrics": {
@@ -16,7 +16,7 @@
     },
     "bets": {
       "path": "bets.csv",
-      "sha256": "12e367c2212920438e7f827769ef7bf38b67c9618720b7d5d0de419b0713bc7e",
+      "sha256": "12cf181c55ae6ddb0b2062b3d64f867402fe15252cc4d0a17f5015979c4548a9",
       "rows": 60
     },
     "odds_audit": {
@@ -26,7 +26,7 @@
     },
     "metrics": {
       "path": "metrics.json",
-      "sha256": "fc732576234dafefac9cc37c3706a06b822806384605119590d679a736d49759"
+      "sha256": "16446db2e59c285c750c414948996562dbc5b6918f70e9caf67cb428047b3a2f"
     }
   },
   "odds_counts": {

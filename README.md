@@ -71,6 +71,10 @@ unmatched; the dashboard defaults to matched-only. Legacy `results.tsv` / `outpu
 per-bet odds tier, so real runs cannot be bundled until that is emitted; `data/sample/` holds a synthetic run
 (`python -m tests.sample_run` regenerates it).
 
+The **Run Comparison** tab compares complete bundles in one table plus full-run model-error, flat-stake uncertainty,
+selected-tier ROI, and full-run return/drawdown charts. Full-run and odds-tier-filtered metrics are labeled separately.
+It keeps reproducibility runs visible and warns when historical bundles lack source/config/data fingerprints or may
+reflect different code, data, calibration, sign, or odds logic; compare only runs with compatible provenance.
 ### Capturing a real run (replay)
 
 ```bash

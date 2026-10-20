@@ -68,11 +68,12 @@ This produces a reproducible dashboard bundle without changing `experiment.py`�
 Refactor `dashboard.py` into a thin Streamlit entry point plus testable loaders/view helpers (or retain one file only if that is substantially simpler). Implement these views:
 
 1. **Run Health** — selected run’s status, creation time, data coverage, configuration fingerprint, fold definition, warnings, and artifact freshness. No charts if provenance is invalid.
-2. **Experiments** — aggregate experiment history from `results.tsv`, with model/config filters. Label this as an experiment log, separate from a selected run’s results.
-3. **Model Quality** — fold-level RMSE/MAE if present, residual diagnostics, coverage, and calibration reliability plot with bin counts. Clearly label unavailable metrics rather than infer them.
-4. **Odds & Join Quality** — matched/mirrored/default/unmatched counts and rates, duplicate-key warnings, and filters that exclude non-matched odds from performance metrics by default.
-5. **Betting Simulation** — candidate count, selected bets, coverage, win rate, ROI, bankroll curve, drawdown, Kelly distribution, and daily exposure. Settled results only; label all units and starting bankroll.
-6. **Artifacts** — downloadable manifest and selected run tables; do not expose filesystem paths outside the local app.
+2. **Run Comparison** — compare complete run bundles in one table and in separate model-error, flat-stake uncertainty, selected-tier ROI, and full-run return/drawdown charts. Keep full-run and odds-tier-filtered metrics visibly separate, weight bankroll-relative P&L in common units, expose missing provenance fingerprints, and do not collapse reproducibility runs or imply unlike historical runs are directly comparable.
+3. **Experiments** — aggregate experiment history from `results.tsv`, with model/config filters. Label this as an experiment log, separate from a selected run’s results.
+4. **Model Quality** — fold-level RMSE/MAE if present, residual diagnostics, coverage, and calibration reliability plot with bin counts. Clearly label unavailable metrics rather than infer them.
+5. **Odds & Join Quality** — matched/mirrored/default/unmatched counts and rates, duplicate-key warnings, and filters that exclude non-matched odds from performance metrics by default.
+6. **Betting Simulation** — candidate count, selected bets, coverage, win rate, ROI, bankroll curve, drawdown, Kelly distribution, and daily exposure. Settled results only; label all units and starting bankroll.
+7. **Artifacts** — downloadable manifest and selected run tables; do not expose filesystem paths outside the local app.
 
 Global controls: run selector, date range, odds-quality filter, and “include legacy/unbundled data” toggle (off by default). Use an explicit refresh button and cache invalidation based on manifest/artifact modification time.
 

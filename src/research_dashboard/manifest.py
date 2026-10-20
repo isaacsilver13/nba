@@ -37,6 +37,12 @@ class Run:
             raise ValueError(f"run {self.run_id} is {self.status}; refusing to load {name}")
         return pd.read_csv(self.run_dir / self.data["artifacts"][name]["path"])
 
+    def read_metrics(self) -> dict:
+        if self.status != "complete":
+            raise ValueError(f"run {self.run_id} is {self.status}; refusing to load metrics")
+        path = self.run_dir / self.data["artifacts"]["metrics"]["path"]
+        return json.loads(path.read_text())
+
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -62,6 +68,12 @@ def check_artifact(run_dir: Path, name: str, entry: dict) -> list:
     if sha256(p) != entry.get("sha256"):
         return [f"{name}: checksum mismatch (file changed since capture)"]
     if cols is None:
+        try:
+            payload = json.loads(p.read_text())
+        except (OSError, ValueError) as e:
+            return [f"{name}: invalid JSON ({e})"]
+        if not isinstance(payload, dict):
+            return [f"{name}: JSON root must be an object"]
         return []
     df = pd.read_csv(p)
     out = []

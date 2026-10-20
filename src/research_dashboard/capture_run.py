@@ -18,7 +18,7 @@ from .catalog import outputs_dir
 from .manifest import ARTIFACTS, ODDS_TIERS, SCHEMA_VERSION, check_artifact, check_folds, sha256
 
 
-def capture(run_id: str, sources: dict, outputs: Path) -> Path:
+def capture(run_id: str, sources: dict, outputs: Path, created_at: str | None = None) -> Path:
     """sources: artifact name -> source path (may omit names). Returns the run dir."""
     run_dir = Path(outputs) / "research_runs" / run_id
     if run_dir.exists():
@@ -60,14 +60,14 @@ def capture(run_id: str, sources: dict, outputs: Path) -> Path:
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
-        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "created_at": created_at or datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "status": "complete" if not problems else "partial",
         "artifacts": arts,
         "odds_counts": counts,
         "folds": folds,
         "warnings": problems,
     }
-    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))  # written last
+    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), newline="\n")  # written last
     return run_dir
 
 
