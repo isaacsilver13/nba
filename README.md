@@ -70,6 +70,11 @@ unmatched; the dashboard defaults to matched-only. The Experiment Log tab reads 
 results of the selected run. Real runs are bundled with `replay_run` (below); `data/sample/` holds a synthetic run
 (`python -m tests.sample_run` regenerates it).
 
+The **Run Comparison** tab compares complete bundles in one table plus full-run model-error, flat-stake uncertainty,
+selected-tier ROI, and full-run return/drawdown charts. Full-run and odds-tier-filtered metrics are labeled separately.
+It keeps reproducibility runs visible and warns when historical bundles lack source/config/data fingerprints or may
+reflect different code, data, calibration, sign, or odds logic; compare only runs with compatible provenance.
+
 ## Feature pipeline
 
 `python tools/run_features.py` rebuilds the model table (`data/processed/df_model_3.csv`, ~40 s) from the ingested box

@@ -1,1 +1,1 @@
-{"rmse": 15.508666666666668, "mae": 12.536000000000001, "n_folds": 3, "starting_bankroll": 1.0, "units": "fraction of starting bankroll"}
+{"rmse": 15.508666666666668, "mae": 12.536000000000001, "n_folds": 3, "starting_bankroll": 1.0, "units": "kelly_fraction and pnl are fractions of the CURRENT bankroll"}

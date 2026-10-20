@@ -7,13 +7,73 @@ import pytest
 from src.research_dashboard.capture_run import capture
 from src.research_dashboard.catalog import list_runs
 from src.research_dashboard.manifest import load_manifest, safe_path
-from tests.sample_run import make_run, write_sources
+from src.research_dashboard.views import bet_summary, chart_gate_message, comparison_table
+from tests.sample_run import make_run, regenerate_committed_sample, write_sources
 
 
 def test_complete_run_loads(tmp_path):
     run = load_manifest(make_run(tmp_path / "out", "r1", tmp_path / "src"))
     assert run.status == "complete", run.problems
     assert len(run.read("bets")) == 60
+
+
+def test_complete_run_does_not_show_chart_disabled_warning():
+    assert chart_gate_message("r1", "complete") is None
+    assert "charts are disabled" in chart_gate_message("r1", "partial")
+
+
+def test_comparison_table_summarizes_complete_runs_by_selected_odds_tier(tmp_path):
+    complete = load_manifest(make_run(tmp_path / "out", "r1", tmp_path / "src"))
+    partial_dir = make_run(tmp_path / "out", "r2", tmp_path / "src2", seed=1)
+    (partial_dir / "bets.csv").unlink()
+    partial = load_manifest(partial_dir)
+
+    table = comparison_table([complete, partial], ["matched"])
+
+    assert list(table["run_id"]) == ["r1"]
+    assert table.loc[0, "run_model_rmse"] == pytest.approx(complete.read_metrics()["rmse"])
+    assert table.loc[0, "tier_bets"] == int((complete.read("bets")["odds_tier"] == "matched").sum())
+    assert 0 <= table.loc[0, "matched_odds_share"] <= 1
+    assert 0 <= table.loc[0, "tier_coverage"] <= 1
+    assert table.loc[0, ["source_fingerprint", "config_fingerprint", "data_fingerprint"]].isna().all()
+
+
+def test_sample_fixture_regeneration_is_repeatable(tmp_path):
+    root = tmp_path / "sample"
+    first = regenerate_committed_sample(root)
+    first_bytes = {path.name: path.read_bytes() for path in first.iterdir()}
+
+    second = regenerate_committed_sample(root)
+    second_bytes = {path.name: path.read_bytes() for path in second.iterdir()}
+
+    assert first == second
+    assert first_bytes == second_bytes
+
+
+def test_bet_summary_weights_fractional_pnl_by_pre_bet_bankroll():
+    bets = pd.DataFrame({
+        "game_date": ["2024-01-01", "2024-01-02"],
+        "kelly_fraction": [0.1, 0.1],
+        "pnl": [0.1, -0.1],
+        "bankroll": [1.1, 0.99],
+        "win": [1, 0],
+    })
+
+    summary = bet_summary(bets)
+
+    assert summary["roi"] == pytest.approx((0.1 - 0.11) / (0.1 + 0.11))
+    assert summary["max_drawdown"] == pytest.approx(0.1)
+
+
+@pytest.mark.parametrize("bad_metrics", ["{not json", "[]"])
+def test_bad_metrics_json_makes_run_partial(tmp_path, bad_metrics):
+    sources = write_sources(tmp_path / "src")
+    sources["metrics"].write_text(bad_metrics)
+
+    run = load_manifest(capture("r1", sources, tmp_path / "out"))
+
+    assert run.status == "partial"
+    assert any("metrics:" in problem for problem in run.problems)
 
 
 def test_path_traversal_rejected(tmp_path):
