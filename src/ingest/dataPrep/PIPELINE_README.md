@@ -1,113 +1,26 @@
 # NBA Prediction - Data Preparation Pipeline
 
-The dataPrep pipeline has been split into two separate pipelines for better modularity and flexibility.
-
-## Pipeline Modes
-
-### 1. **Full Pipeline** (pipeline.py)
-Runs all steps in sequence. Useful when you need the complete workflow.
+One entry point, three modes:
 
 ```bash
-# Run full pipeline
-python -m src.ingest.dataPrep.pipeline
-
-# Or with explicit mode
-python -m src.ingest.dataPrep.pipeline --mode full
+python -m src.ingest.dataPrep.pipeline --mode ingest    # steps 1, 3, 3a  (downloads; needs nba_api)
+python -m src.ingest.dataPrep.pipeline --mode features  # steps 2, 4, 5, 6, 6a
+python -m src.ingest.dataPrep.pipeline --mode full      # all of the above
+python tools/run_features.py                            # 3a + features, cache reads off (~40 s)
 ```
 
-**Steps executed:** 1 → 2 → 3 → 3a → 4 → 5 → 6 → 6a
+| Step | Module | Output (`data/processed/`) |
+|---|---|---|
+| 1 | `fetch_games` | `nba_games_with_game_id.csv` — schedule, scores, spread, NBA game id |
+| 3 | `fetch_player_boxscores` | `all_boxscores.csv`, `team_boxscores_v3.csv` (per-game cache in `data/cache/boxscores/<family>/`) |
+| 3a | `aggregate_player_to_team` | `team opp stats.csv` — team and opponent sums, V3 team metrics, usage concentration |
+| 2 | `calculate_elo_and_rest` | `nba_games_with_game_id_processed.csv` — Elo, rest, form, streaks |
+| 4 | `engineer_advanced_features` | `df_model.csv`, `team_game.csv` — pregame absences, top-8 form, bench, after-OT |
+| 5 | `calculate_travel_fatigue` | `df_model_with_travel.csv` |
+| 6 | `engineer_rolling_features` | `df_model_2.csv` — rolling / EWM / season-to-date team stats, style matchup |
+| 6a | `finalize_feature_selection` | `df_model_3.csv` — the model table `experiment.py` reads |
 
----
-
-### 2. **Ingest Raw Data** (ingest_raw_data.py)
-Fetches raw data from NBA API and prepares it for feature calculation.
-
-```bash
-python -m src.ingest.dataPrep.ingest_raw_data
-```
-
-**Steps executed:**
-- **Step 1:** Fetch game data (games, scores, spreads, etc.)
-- **Step 3:** Fetch player-level box score data
-- **Step 3a:** Roll player data up to team level
-
-**Output:** Raw game and player data ready for feature engineering
-
----
-
-### 3. **Calculate Features** (calculate_features.py)
-Computes derived features from ingested raw data.
-
-```bash
-python -m src.ingest.dataPrep.calculate_features
-```
-
-**Steps executed:**
-- **Step 2:** Elo, rest days, back-to-back games, rolling team stats
-- **Step 4:** Team/player features, injury flags, rest status
-- **Step 5:** Travel distance and fatigue features
-- **Step 6:** Additional feature calculations
-- **Step 6a:** Final feature transformations
-
-**Input:** Raw data from ingest pipeline
-**Output:** Feature-engineered dataset ready for modeling
-
----
-
-## Usage Patterns
-
-### Pattern 1: Development & Iteration
-1. Run ingest once to cache raw data
-2. Iterate on features quickly without re-fetching data
-
-```bash
-# First time - ingest data
-python -m src.ingest.dataPrep.ingest_raw_data
-
-# Then rapidly test feature changes
-python -m src.ingest.dataPrep.calculate_features
-python -m src.ingest.dataPrep.calculate_features
-python -m src.ingest.dataPrep.calculate_features
-```
-
-### Pattern 2: Full Refresh
-When you need completely fresh data:
-
-```bash
-python -m src.ingest.dataPrep.pipeline --mode full
-```
-
-### Pattern 3: Feature-Only Pipeline
-When raw data is already cached and you only want to recalculate features:
-
-```bash
-python -m src.ingest.dataPrep.pipeline --mode features
-```
-
----
-
-## Pipeline Architecture
-
-```
-pipeline.py (main entry point)
-├── ingest_raw_data.py (can run independently)
-│   ├── step1.run()    - Fetch games
-│   ├── step3.run()    - Fetch player box scores
-│   └── step3a.run()   - Roll up to team level
-└── calculate_features.py (can run independently)
-    ├── step2.run()    - Elo, rest, B2B, rolling stats
-    ├── step4.run()    - Features, injury, rest
-    ├── step5.run()    - Travel, fatigue
-    ├── step6.run()    - Additional features
-    └── step6a.run()   - Final transformations
-```
-
----
-
-## Benefits of This Split
-
-✅ **Faster Iteration:** Recalculate features without waiting for API calls
-✅ **Modularity:** Each pipeline can be used independently
-✅ **Flexibility:** Mix and match - use cached data with updated feature logic
-✅ **Debugging:** Easier to isolate issues in ingestion vs. feature calculation
-✅ **Scalability:** Can parallelize ingestion and feature calculation if needed
+`df_model_2.csv` still contains the raw same-game box score columns; only step 6a's allowlist removes them. Read
+`df_model_3.csv`, never `df_model_2.csv`, for modeling. Every feature must use information available before tip-off:
+after changing a step, run `python -m pytest tests -q`, `python tools/leak_screen.py` and
+`RUN_PIT=1 python -m pytest tests -k point_in_time` (see `docs/feature-leakage-audit-and-fix-plan.md`).

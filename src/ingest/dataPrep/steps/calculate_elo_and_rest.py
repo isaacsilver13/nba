@@ -26,80 +26,48 @@ except ImportError:
 
 
 # ==============================
-# TEAM-LEVEL ROLLING FEATURES
+# TEAM FORM + REST (ALL GAMES, STRICTLY BEFORE THE GAME)
 # ==============================
-def add_team_rolling_features(df, team_col, score_col, prefix, rolling_window):
-    """Add rolling points and margin averages for a team column.
+def add_team_form_features(df, rolling_window):
+    """Add last-N points, margin, rest days and back-to-back flags for both teams.
+
+    Every window runs over the team's own previous games (home AND away) and is shifted one game, so a game's
+    row never sees its own result. Margins are from the team's own perspective (positive = good for that team).
 
     Parameters
     ----------
     df : pd.DataFrame
-        Game-level dataframe with a `date` column.
-    team_col : str
-        Column name for team identifier (e.g., home/away).
-    score_col : str
-        Column name for points scored.
-    prefix : str
-        Prefix used for generated feature names.
+        Game-level dataframe with GAME_ID, date, home, away, score_home, score_away (one row per game).
     rolling_window : int
-        Window size for rolling averages.
+        Window size for the rolling averages (full window required, as before).
 
     Returns
     -------
     pd.DataFrame
-        DataFrame with rolling feature columns appended.
+        df with {home,away}_pts_last{N}, {home,away}_margin_last{N}, {home,away}_rest, {home,away}_b2b added.
     """
-    df = df.sort_values([team_col, "date"])
-    
-    # Rolling average of points
-    df[f"{prefix}_pts_last{rolling_window}"] = (
-        df.groupby(team_col)[score_col]
-        .rolling(rolling_window)
-        .mean()
-        .shift(1)  # avoid future leakage
-        .reset_index(level=0, drop=True)
-    )
+    assert df["GAME_ID"].is_unique, "GAME_ID must be unique per game"
+    long = pd.concat(
+        [
+            df[["GAME_ID", "date"]].assign(side="home", team=df["home"], pts=df["score_home"],
+                                           margin=df["score_home"] - df["score_away"]),
+            df[["GAME_ID", "date"]].assign(side="away", team=df["away"], pts=df["score_away"],
+                                           margin=df["score_away"] - df["score_home"]),
+        ],
+        ignore_index=True,
+    ).sort_values(["team", "date", "GAME_ID"], kind="stable").reset_index(drop=True)
 
-    # Rolling average of margin
-    df[f"{prefix}_margin_last{rolling_window}"] = (
-        df.groupby(team_col)["margin"]
-        .rolling(rolling_window)
-        .mean()
-        .shift(1)
-        .reset_index(level=0, drop=True)
-    )
+    g = long.groupby("team", sort=False)
+    long["pts_last"] = g["pts"].transform(lambda x: x.shift(1).rolling(rolling_window).mean())
+    long["margin_last"] = g["margin"].transform(lambda x: x.shift(1).rolling(rolling_window).mean())
+    long["rest"] = (long["date"] - g["date"].shift(1)).dt.days
 
-    return df
-
-# ==============================
-# REST DAYS & BACK-TO-BACK (B2B) FEATURES
-# ==============================
-def add_rest_features(df, team_col, prefix):
-    """Add rest-day counts and back-to-back flags per team.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Game-level dataframe with a `date` column.
-    team_col : str
-        Column name for team identifier (home/away).
-    prefix : str
-        Prefix used for generated feature names.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with rest and B2B columns appended.
-    """
-    df = df.sort_values([team_col, "date"])
-    prev_date = df.groupby(team_col)["date"].shift(1)
-    
-    # Number of days since previous game
-    df[f"{prefix}_rest"] = (df["date"] - prev_date).dt.days
-    
-    # Back-to-back flag
-    df[f"{prefix}_b2b"] = (df[f"{prefix}_rest"] == 1).astype(int)
-    
+    for side in ("home", "away"):
+        part = long[long["side"] == side].set_index("GAME_ID")
+        df[f"{side}_pts_last{rolling_window}"] = df["GAME_ID"].map(part["pts_last"])
+        df[f"{side}_margin_last{rolling_window}"] = df["GAME_ID"].map(part["margin_last"])
+        df[f"{side}_rest"] = df["GAME_ID"].map(part["rest"])
+        df[f"{side}_b2b"] = (df[f"{side}_rest"] == 1).astype(int)
     return df
 
 
@@ -229,11 +197,7 @@ def run(config=None, inputs=None):
     )
 
     rolling_window = rolling_cfg.get("window", 5)
-    df = add_team_rolling_features(df, "home", "score_home", prefix="home", rolling_window=rolling_window)
-    df = add_team_rolling_features(df, "away", "score_away", prefix="away", rolling_window=rolling_window)
-
-    df = add_rest_features(df, "home", "home")
-    df = add_rest_features(df, "away", "away")
+    df = add_team_form_features(df, rolling_window)
 
     df[f"pts_diff_last{rolling_window}"] = df[f"home_pts_last{rolling_window}"] - df[f"away_pts_last{rolling_window}"]
     df[f"margin_diff_last{rolling_window}"] = (
@@ -280,7 +244,9 @@ def run(config=None, inputs=None):
 
     long_team = long_team.sort_values(["team", "date"]).reset_index(drop=True)
     long_team["win"] = (long_team["margin"] > 0).astype(int)
-    long_team["ats_cover"] = (long_team["margin"] > long_team["team_spread"]).astype(int)
+    # team_spread is the team's signed handicap (-7 = favoured by 7): it covers when margin + handicap > 0; push = half
+    ats_margin = long_team["margin"] + long_team["team_spread"]
+    long_team["ats_cover"] = np.where(ats_margin > 0, 1.0, np.where(ats_margin < 0, 0.0, 0.5))
     long_team["blowout_flag"] = (long_team["margin"].abs() >= 15).astype(int)
 
     recent_windows = [3, 5, 7]
@@ -306,18 +272,18 @@ def run(config=None, inputs=None):
         g["rest_weighted_load"] = rest_weighted
 
         g["margin_std_last_10"] = (
-            g["margin"].shift(1).rolling(10, min_periods=3).std().fillna(0)
+            g["margin"].shift(1).rolling(10, min_periods=3).std()
         )
 
         g["blowout_pct_last20"] = (
-            g["blowout_flag"].shift(1).rolling(blowout_window, min_periods=5).mean().fillna(0)
+            g["blowout_flag"].shift(1).rolling(blowout_window, min_periods=5).mean()
         )
         g["blowout_pct_season"] = (
-            g["blowout_flag"].expanding().mean().shift(1).fillna(0)
+            g["blowout_flag"].expanding().mean().shift(1)
         )
 
         g["ats_roll_last20"] = (
-            g["ats_cover"].shift(1).rolling(ats_window, min_periods=5).mean().fillna(0)
+            g["ats_cover"].shift(1).rolling(ats_window, min_periods=5).mean()
         )
 
         features.append(g[[
@@ -390,12 +356,12 @@ def run(config=None, inputs=None):
     df["games_last_7_days"] = df["home_games_last_7_days"].fillna(0) - df["away_games_last_7_days"].fillna(0)
     df["rest_weighted_load"] = df["home_rest_weighted_load"].fillna(0) - df["away_rest_weighted_load"].fillna(0)
 
-    df["margin_std_last_10"] = df["home_margin_std_last_10"].fillna(0) - df["away_margin_std_last_10"].fillna(0)
+    df["margin_std_last_10"] = df["home_margin_std_last_10"] - df["away_margin_std_last_10"]
 
-    df["blowout_pct_last20"] = df["home_blowout_pct_last20"].fillna(0) - df["away_blowout_pct_last20"].fillna(0)
-    df["blowout_pct_season"] = df["home_blowout_pct_season"].fillna(0) - df["away_blowout_pct_season"].fillna(0)
+    df["blowout_pct_last20"] = df["home_blowout_pct_last20"] - df["away_blowout_pct_last20"]
+    df["blowout_pct_season"] = df["home_blowout_pct_season"] - df["away_blowout_pct_season"]
 
-    df["ats_roll_last20"] = df["home_ats_roll_last20"].fillna(0) - df["away_ats_roll_last20"].fillna(0)
+    df["ats_roll_last20"] = df["home_ats_roll_last20"] - df["away_ats_roll_last20"]
 
     feature_cols = [
         "season",
@@ -474,10 +440,12 @@ def run(config=None, inputs=None):
         (df["score_away"] - df["score_home"]) > df["spread"],
     ).astype(int)
 
-    df = df[df["home_margin"].abs() != df["spread"]].copy()
-
+    # push games stay in the history: dropping them keyed on the final score is a selection on the outcome
+    start = elo_cfg.get("start", 1500)
+    carry = elo_cfg.get("season_carryover", 0.75)
     teams = pd.unique(df[["home", "away"]].values.ravel())
-    elo = {team: elo_cfg.get("start", 1500) for team in teams}
+    elo = {team: start for team in teams}
+    elo_season = {}
 
     elo_home_list = []
     elo_away_list = []
@@ -486,11 +454,18 @@ def run(config=None, inputs=None):
         home = row["home"]
         away = row["away"]
 
+        # new season: pull each team part of the way back to the mean (rosters change over the summer)
+        for t in (home, away):
+            if elo_season.get(t, row["season"]) != row["season"]:
+                elo[t] = carry * elo[t] + (1 - carry) * start
+            elo_season[t] = row["season"]
+
+        # ratings stored WITHOUT home advantage, so a team's rolling Elo doesn't depend on its home/away mix
+        elo_home_list.append(elo[home])
+        elo_away_list.append(elo[away])
+
         elo_home = elo[home] + elo_cfg.get("home_advantage", 65)
         elo_away = elo[away]
-
-        elo_home_list.append(elo_home)
-        elo_away_list.append(elo_away)
 
         exp_home = 1 / (1 + 10 ** ((elo_away - elo_home) / 400))
         exp_away = 1 - exp_home
@@ -509,11 +484,9 @@ def run(config=None, inputs=None):
 
     df = df.sort_values("date").reset_index(drop=True)
 
-    df["elo_diff"] = np.where(
-        df["is_home_favorite"] == 1,
-        df["elo_home"] - df["elo_away"],
-        df["elo_away"] - df["elo_home"],
-    )
+    # home minus away, like the target (home_margin) and every other *_diff feature. It used to be favourite minus
+    # underdog, so its sign flipped with is_home_favorite.
+    df["elo_diff"] = df["elo_home"] - df["elo_away"]
 
     df["home_margin"] = df["score_home"] - df["score_away"]
     df["away_margin"] = -df["home_margin"]
@@ -551,7 +524,7 @@ def run(config=None, inputs=None):
     )
 
     long["ELO_Rolling_2YR"] = (
-        long.groupby("team")["ELO"].transform(lambda x: x.shift(1).rolling(elo_roll).mean())
+        long.groupby("team")["ELO"].transform(lambda x: x.shift(1).rolling(elo_roll, min_periods=20).mean())
     )
 
     for col in ["rolling_margin_5", "rolling_margin_10"]:
@@ -583,23 +556,12 @@ def run(config=None, inputs=None):
         }
     ).drop(columns="team")
 
-    df["rolling_margin_diff_5"] = np.where(
-        df["is_home_favorite"] == 1,
-        df["home_roll_5"] - df["away_roll_5"],
-        df["away_roll_5"] - df["home_roll_5"],
-    ).clip(-20, 20)
+    # home minus away (these were favourite minus underdog too)
+    df["rolling_margin_diff_5"] = (df["home_roll_5"] - df["away_roll_5"]).clip(-20, 20)
+    df["rolling_margin_diff_10"] = (df["home_roll_10"] - df["away_roll_10"]).clip(-15, 15)
 
-    df["rolling_margin_diff_10"] = np.where(
-        df["is_home_favorite"] == 1,
-        df["home_roll_10"] - df["away_roll_10"],
-        df["away_roll_10"] - df["home_roll_10"],
-    ).clip(-15, 15)
-
-    df["last_game_home"] = df.groupby("home")["date"].shift(1)
-    df["last_game_away"] = df.groupby("away")["date"].shift(1)
-
-    df["home_rest"] = (df["date"] - df["last_game_home"]).dt.days.clip(0, 5)
-    df["away_rest"] = (df["date"] - df["last_game_away"]).dt.days.clip(0, 5)
+    df["home_rest"] = df["home_rest"].clip(0, 5)  # days since the team's previous game (any venue)
+    df["away_rest"] = df["away_rest"].clip(0, 5)
 
     df["rest_advantage"] = (df["home_rest"] - df["away_rest"]).clip(-3, 3)
     df["rest_advantage_sq"] = np.sign(df["rest_advantage"]) * (df["rest_advantage"] ** 2)

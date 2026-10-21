@@ -184,12 +184,17 @@ def run(config=None, inputs=None):
     df_games["travel_diff_7d"] = df_games["home_travel_7d"] - df_games["away_travel_7d"]
     df_games["travel_diff_10d"] = df_games["home_travel_10d"] - df_games["away_travel_10d"]
 
+    # z-score against the home team's EARLIER games this season only (mean/std over the whole season would
+    # include future games). Fewer than 5 earlier games -> 0.
+    date_key = "date_x" if "date_x" in df_games.columns else "date"
+    ordered = df_games.sort_values([date_key, "GAME_ID"], kind="stable")
     for d in windows:
-        df_games[f"travel_{d}d_z"] = (
-            df_games.groupby(["home", "season"])[f"home_travel_{d}d"]
-            .transform(lambda x: (x - x.mean()) / x.std())
-            .fillna(0)
-        )
+        col = f"home_travel_{d}d"
+        prior = ordered.groupby(["home", "season"])[col]
+        prior_mean = prior.transform(lambda x: x.shift(1).expanding(min_periods=5).mean())
+        prior_std = prior.transform(lambda x: x.shift(1).expanding(min_periods=5).std())
+        z = ((ordered[col] - prior_mean) / prior_std).replace([float("inf"), float("-inf")], float("nan"))
+        df_games[f"travel_{d}d_z"] = z.reindex(df_games.index).fillna(0)
 
     altitude_teams = altitude_cfg.get("teams", {})
     altitude_threshold = altitude_cfg.get("threshold", 1000)

@@ -71,6 +71,12 @@ unmatched; the dashboard defaults to matched-only. Legacy `results.tsv` / `outpu
 per-bet odds tier, so real runs cannot be bundled until that is emitted; `data/sample/` holds a synthetic run
 (`python -m tests.sample_run` regenerates it).
 
+## Feature pipeline
+
+`python tools/run_features.py` rebuilds the model table (`data/processed/df_model_3.csv`, ~40 s) from the ingested box
+scores. `python -m src.ingest.dataPrep.pipeline --mode ingest|features|full` is the full entry point; the ingest steps
+download from stats.nba.com and need `nba_api`. See `src/ingest/dataPrep/PIPELINE_README.md`.
+
 ### Capturing a real run (replay)
 
 ```bash
