@@ -287,8 +287,9 @@ else:
         if bets_f.empty:
             st.info("No bets in the selected range and odds tiers.")
         else:
-            s = bet_summary(bets_f)
-            all_tiers = bet_summary(bets)
+            units = run.read_metrics().get("units")
+            s = bet_summary(bets_f, units)
+            all_tiers = bet_summary(bets, units)
             c = st.columns(5)
             c[0].metric("Bets", s["bets"])
             c[1].metric("Win rate", f"{s['win_rate']:.1%}")

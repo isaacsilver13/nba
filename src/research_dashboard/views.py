@@ -23,8 +23,8 @@ def comparison_table(runs, tiers) -> pd.DataFrame:
         all_bets = run.read("bets")
         selected_bets = filter_tiers(all_bets, tiers)
         selected_audit = filter_tiers(run.read("odds_audit"), tiers)
-        selected = bet_summary(selected_bets)
-        full = bet_summary(all_bets)
+        selected = bet_summary(selected_bets, metrics.get("units"))
+        full = bet_summary(all_bets, metrics.get("units"))
         odds_counts = run.data.get("odds_counts", {})
         audited = sum(odds_counts.values())
         rows.append({
@@ -56,8 +56,8 @@ def filter_tiers(df: pd.DataFrame, tiers) -> pd.DataFrame:
     return df[df["odds_tier"].isin(list(tiers))]
 
 
-def bet_summary(bets: pd.DataFrame) -> dict:
-    """Convert bankroll-relative stake/P&L fractions to common bankroll units before ROI."""
+def bet_summary(bets: pd.DataFrame, units: str | None = None) -> dict:
+    """Convert each recorded stake/P&L fraction using its run's bankroll basis."""
     if bets.empty:
         return {"bets": 0}
     ordered = bets.sort_values("game_date", kind="stable")
@@ -65,8 +65,11 @@ def bet_summary(bets: pd.DataFrame) -> dict:
     pnl_fraction = ordered["pnl"].astype(float)
     if "bankroll_open" in ordered:
         opening = ordered["bankroll_open"].astype(float)
-    else:
+    elif units and "current bankroll" in units.lower():
         opening = bk / (1.0 + pnl_fraction)
+    else:
+        # Early bundles used fractions of starting bankroll and had no bankroll_open column.
+        opening = 1.0
     stakes = ordered["kelly_fraction"].astype(float) * opening
     profits = pnl_fraction * opening
     peaks = np.maximum.accumulate(np.r_[1.0, bk.to_numpy()])[1:]

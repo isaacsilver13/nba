@@ -59,10 +59,23 @@ def test_bet_summary_weights_fractional_pnl_by_pre_bet_bankroll():
         "win": [1, 0],
     })
 
-    summary = bet_summary(bets)
+    summary = bet_summary(bets, "kelly_fraction and pnl are fractions of the CURRENT bankroll")
 
     assert summary["roi"] == pytest.approx((0.1 - 0.11) / (0.1 + 0.11))
     assert summary["max_drawdown"] == pytest.approx(0.1)
+
+
+def test_bet_summary_preserves_starting_bankroll_units_for_legacy_runs():
+    bets = pd.DataFrame({
+        "game_date": ["2024-01-01", "2024-01-02"],
+        "kelly_fraction": [0.1, 0.1],
+        "pnl": [0.1, -0.05],
+        "bankroll": [1.1, 1.05],
+        "win": [1, 0],
+    })
+
+    assert bet_summary(bets, "fraction of starting bankroll")["roi"] == pytest.approx(0.25)
+    assert bet_summary(bets)["roi"] == pytest.approx(0.25)
 
 
 def test_bet_summary_uses_day_opening_bankroll_when_recorded():
