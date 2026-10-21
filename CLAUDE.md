@@ -36,3 +36,11 @@ This repo's central mechanism is `autorun.py` driving an LLM (Groq or OpenAI, pe
 - `experiment.py` is the only model/backtest code. Earlier model scripts (`src/ingest/models/`, `src/ingest/old/`) and autorun snapshots were removed 2026-10-08; they were built on leaky features and are in git history if needed.
 - For lineup ingestion, official boxscore-listed players count as appearances (including DNPs) — don't add a separate player-stat download path for this.
 - Prefer read-through caches and full artifact reconstruction over partial-cache assumptions; check cache completeness, file dates, and column names before re-fetching. Preserve existing cache paths/schemas unless a migration is explicit.
+
+## Working rules
+
+- `README.md` owns setup and entrypoints; `program.md` + `experiment.py` own autoresearch constraints (the `FROZEN` section and results format are protected).
+- Preserve join audits, and identify fallback/default odds rows before interpreting betting results.
+- One focused experiment change at a time; record the exact config and artifact paths.
+- Inspect the owning module, neighboring tests, and current artifact schema before editing. Make the smallest change, run the narrowest import/compile/test/dry-run after each edit, and don't claim a historical fix still works without current evidence.
+- Project slash commands in `.claude/commands/`: `/nba-model-review` (leakage/join/metric review before proposing one change) and `/nba-dataprep` (one narrow DataPrep slice).
