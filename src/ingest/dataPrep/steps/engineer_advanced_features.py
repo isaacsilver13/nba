@@ -7,12 +7,12 @@ import numpy as np
 try:
     # When imported as a package module
     from ..config import get_config, resolve_step_config
-    from ..helpers import load_cached_output, save_output, parse_absence_reason, normalize_status
+    from ..helpers import dedupe_player_games, load_cached_output, save_output
 except ImportError:
     # When loaded dynamically or as direct import
     try:
         from ingest.dataPrep.config import get_config, resolve_step_config
-        from ingest.dataPrep.helpers import load_cached_output, save_output, parse_absence_reason, normalize_status
+        from ingest.dataPrep.helpers import dedupe_player_games, load_cached_output, save_output
     except ImportError:
         # Fallback for different import contexts
         import sys
@@ -21,7 +21,7 @@ except ImportError:
         if parent_dir not in sys.path:
             sys.path.insert(0, parent_dir)
         from config import get_config, resolve_step_config
-        from helpers import load_cached_output, save_output, parse_absence_reason, normalize_status
+        from helpers import dedupe_player_games, load_cached_output, save_output
 
 
 def historical_top_player_features(players, top_n):
@@ -135,6 +135,8 @@ def clean_player_data(df_players, df_games):
     if "team" in df_players.columns:
         df_players["team"] = df_players["team"].astype(str).str.upper().str.strip()
 
+    df_players = dedupe_player_games(df_players)  # duplicated rows make a game's own stats part of its "previous games"
+
     # Ensure expected numeric columns exist and are numeric
     required_numeric = [
         "points", "rebounds", "assists", "STL", "BLK", "turnovers", "PF", "PLUS_MINUS",
@@ -184,32 +186,12 @@ def clean_player_data(df_players, df_games):
         df_players["GAME_ID"].astype(str).str.replace(".0", "", regex=False).str.zfill(10)
     )
 
-    df_players["did_not_play"] = df_players["status"].str.contains("DNP|DND|NWT", regex=True)
-
-    df_players["injury_absence"] = df_players["status"].str.contains(
-        "INJURY|ILLNESS|CONCUSSION|HEALTH AND SAFETY|RECONDITIONING", regex=True
-    )
-
-    df_players["rest_absence"] = df_players["status"].str.contains("REST", regex=True)
-
     df_players["coach_decision_absence"] = df_players["status"].str.contains("COACH", regex=True)
 
-    df_players["personal_absence"] = df_players["status"].str.contains("PERSONAL", regex=True)
-
-    df_players["trade_absence"] = df_players["status"].str.contains("TRADE", regex=True)
-
-    df_players["suspension_absence"] = df_players["status"].str.contains("SUSPENSION", regex=True)
-
-    df_players["absence_reason"] = np.select(
-        [
-            df_players["injury_absence"],
-            df_players["rest_absence"],
-            df_players["suspension_absence"],
-            df_players["coach_decision_absence"],
-            df_players["personal_absence"] | df_players["trade_absence"],
-        ],
-        ["injury", "rest", "suspension", "coach", "personal"],
-        default="other",
+    # Known before tip-off: official inactives (DND/NWT) and declared injury/illness/rest/personal absences.
+    # "DNP - Coach's Decision" (and a blank reason) is decided or unknown at game time, so it is never pregame.
+    df_players["pregame_out"] = (
+        (~df_players["did_play"]) & (df_players["status"] != "") & (~df_players["coach_decision_absence"])
     )
 
     df_players = df_players.merge(
@@ -242,36 +224,9 @@ def clean_player_data(df_players, df_games):
     existing_cols = [c for c in cols_to_fill if c in df_players.columns]
     df_players[existing_cols] = df_players[existing_cols].fillna(0)
 
-    df_players["is_home"] = df_players["team"] == df_players["home"]
-    df_players["points_per_min"] = df_players["points"] / df_players["minutes_played"]
-    df_players["rebounds_per_min"] = df_players["rebounds"] / df_players["minutes_played"]
-    df_players["assists_per_min"] = df_players["assists"] / df_players["minutes_played"]
-
     df_players["usage_proxy"] = (
         df_players["fga"] + 0.44 * df_players["fta"] + df_players["turnovers"]
     ) / df_players["minutes_played"]
-
-    df_players["poss_proxy"] = (
-        df_players["fga"] + 0.44 * df_players["fta"] + df_players["turnovers"]
-    ).clip(lower=1)
-
-    df_players["pts_per_100"] = df_players["points"] / df_players["poss_proxy"] * 100
-
-    df_players["ast_rate"] = df_players["assists"] / df_players["fga"]
-    df_players["tov_rate"] = df_players["turnovers"] / df_players["poss_proxy"]
-
-    df_players["3pa_rate"] = df_players["three_pa"] / df_players["fga"]
-    df_players["2pa_rate"] = (df_players["fga"] - df_players["three_pa"]) / df_players["fga"]
-    df_players["ft_rate"] = df_players["fta"] / df_players["fga"]
-
-    df_players["3p_pct"] = df_players["three_pm"] / df_players["three_pa"].replace(0, np.nan)
-    df_players["2p_pct"] = (
-        (df_players["fgm"] - df_players["three_pm"]) / (df_players["fga"] - df_players["three_pa"]).replace(0, np.nan)
-    )
-    df_players["ft_pct"] = df_players["ftm"] / df_players["fta"].replace(0, np.nan)
-
-    df_players["oreb_rate"] = df_players["OREB"] / (df_players["OREB"] + df_players["OREB"])
-    df_players["dreb_rate"] = df_players["DREB"] / (df_players["DREB"] + df_players["DREB"])
 
     return df_players, df_games
 
@@ -294,8 +249,6 @@ def run(config=None, inputs=None):
     cfg = resolve_step_config(get_config(), "step4") if config is None else resolve_step_config(config, "step4")
     paths = cfg["paths"]
     rolling_cfg = cfg["rolling"]
-    strength_cfg = cfg["player_strength"]
-    injury_cfg = cfg["injury"]
     cache_cfg = cfg.get("cache", {})
 
     output_team_game = paths["output_team_game"]
@@ -328,165 +281,62 @@ def run(config=None, inputs=None):
     roll_windows = rolling_cfg["windows"]
     min_games = rolling_cfg.get("min_games", 3)
 
+    # lagged per-player form: only these three feed the features below
     for w in roll_windows:
-        for stat in [
-            "points",
-            "rebounds",
-            "assists",
-            "usage_proxy",
-            "minutes_played",
-            "PLUS_MINUS",
-            "fgm",
-            "fga",
-            "three_pm",
-            "three_pa",
-            "OREB",
-            "DREB",
-            "STL",
-            "BLK",
-            "turnovers",
-        ]:
+        for stat in ["points", "usage_proxy", "minutes_played"]:
             df_players[f"player_{stat}_r{w}"] = (
                 df_players.groupby("PLAYER_ID")[stat]
                 .transform(lambda x: x.shift(1).rolling(w, min_periods=min_games).mean())
             ).fillna(0)
-        for stat in ["3p_pct", "2p_pct", "ft_pct"]:
-            if stat == "3p_pct":
-                df_players[f"player_{stat}_r{w}"] = (
-                    df_players["three_pm"] / df_players["three_pa"]
-                ).fillna(0)
-            elif stat == "2p_pct":
-                df_players[f"player_{stat}_r{w}"] = (
-                    df_players["fgm"] - df_players["three_pm"] / df_players["fga"] - df_players["three_pa"]
-                ).fillna(0)
-            elif stat == "ft_pct":
-                df_players[f"player_{stat}_r{w}"] = (
-                    df_players["ftm"] / df_players["fta"]
-                ).fillna(0)
-
-    roll_cols = [
-        "pts_per_100",
-        "ast_rate",
-        "tov_rate",
-        "3pa_rate",
-        "2pa_rate",
-        "ft_rate",
-        "oreb_rate",
-        "dreb_rate",
-    ]
-
-    for w in roll_windows:
-        for col in roll_cols:
-            df_players[f"team_{col}_r{w}"] = (
-                df_players.groupby("TEAM_ID")[col].shift(1).rolling(w, min_periods=3).mean()
-            )
-
-    # De-fragment after many column inserts to keep later assignments fast
-    df_players = df_players.copy()
-
-    top_usage_n = rolling_cfg.get("top_usage_n", 2)
 
     df_players["usage_rank_game"] = df_players.groupby(["GAME_ID", "TEAM_ID"])[
         "player_usage_proxy_r5"
     ].rank(method="first", ascending=False)
 
-    df_players["missing_top1_flag"] = (
-        (df_players["usage_rank_game"] == 1) & (~df_players["did_play"])
+    # Only pregame-known absences; player_*_r5 are lagged, usage_rank_game ranks lagged usage.
+    df_players["pregame_missing_top1"] = (
+        (df_players["usage_rank_game"] == 1) & df_players["pregame_out"]
     ).astype(int)
-    df_players["missing_top2_flag"] = (
-        (df_players["usage_rank_game"] == 2) & (~df_players["did_play"])
+    df_players["pregame_missing_top2"] = (
+        (df_players["usage_rank_game"] == 2) & df_players["pregame_out"]
     ).astype(int)
 
-    df_players["minutes_lost_last_game"] = np.where(
-        df_players["did_play"], 0, df_players["player_minutes_played_r5"]
+    df_players["pregame_minutes_out"] = np.where(
+        df_players["pregame_out"], df_players["player_minutes_played_r5"], 0
     )
-    df_players["usage_lost_last_game"] = np.where(
-        df_players["did_play"], 0, df_players["player_usage_proxy_r5"]
+    df_players["pregame_usage_out"] = np.where(
+        df_players["pregame_out"], df_players["player_usage_proxy_r5"], 0
     )
+
+    # Games backfilled from the box-score-only CSV have no DNP/inactive rows: absences are UNKNOWN there, not zero.
+    if "endpoint_family" in df_players.columns:
+        df_players["absence_unknown"] = df_players["endpoint_family"].eq("csv_backfill")
+    else:
+        df_players["absence_unknown"] = False
 
     missing_flags = (
         df_players.groupby(["GAME_ID", "TEAM_ID", "team"], as_index=False)
         .agg(
-            missing_top1_flag=("missing_top1_flag", "max"),
-            missing_top2_flag=("missing_top2_flag", "max"),
-            minutes_lost_last_game=("minutes_lost_last_game", "sum"),
-            usage_lost_last_game=("usage_lost_last_game", "sum"),
+            date=("date", "first"),
+            absence_unknown=("absence_unknown", "max"),
+            pregame_missing_top1=("pregame_missing_top1", "max"),
+            pregame_missing_top2=("pregame_missing_top2", "max"),
+            pregame_minutes_out=("pregame_minutes_out", "sum"),
+            pregame_usage_out=("pregame_usage_out", "sum"),
         )
+        .sort_values(["TEAM_ID", "date", "GAME_ID"])
     )
-
-    player_strength = (
-        df_players.groupby(["TEAM_ID", "PLAYER_ID"])
-        .agg(
-            avg_minutes=("minutes_played", "mean"),
-            avg_points=("points", "mean"),
-            avg_usage=("usage_proxy", "mean"),
-        )
-        .reset_index()
+    # what the team was missing going INTO its previous game (a true "last game" version)
+    missing_flags["prev_game_minutes_out"] = (
+        missing_flags.groupby("TEAM_ID")["pregame_minutes_out"].shift(1).fillna(0)
     )
-
-    player_strength["minutes_z"] = (
-        player_strength.groupby("TEAM_ID")["avg_minutes"]
-        .transform(lambda x: (x - x.mean()) / (x.std() + 1e-6))
-    )
-
-    player_strength["usage_z"] = (
-        player_strength.groupby("TEAM_ID")["avg_usage"]
-        .transform(lambda x: (x - x.mean()) / (x.std() + 1e-6))
-    )
-
-    player_strength["key_score"] = 0.6 * player_strength["minutes_z"] + 0.4 * player_strength["usage_z"]
-
-    player_strength["is_key_player"] = (
-        player_strength["key_score"] > strength_cfg.get("key_score_threshold", 0.75)
-    )
-
-    df_players = df_players.merge(
-        player_strength[["TEAM_ID", "PLAYER_ID", "is_key_player"]],
-        on=["TEAM_ID", "PLAYER_ID"],
-        how="left",
-    )
-
-    df_players = df_players.sort_values(["PLAYER_ID", "date"])
-
-    df_players["last_played_date"] = (
-        df_players.where(df_players["did_play"]).groupby("PLAYER_ID")["date"].ffill()
-    )
-
-    df_players["days_since_played"] = (
-        df_players["date"] - df_players["last_played_date"]
-    ).dt.days.fillna(30)
-
-    half_life_days = injury_cfg.get("half_life_days", 7)
-
-    df_players["injury_decay"] = np.exp(-df_players["days_since_played"] / half_life_days)
-
-    df_players["injury_impact"] = np.where(
-        df_players["injury_absence"], df_players["injury_decay"], 0.0
-    )
-
-    team_absences = (
-        df_players[~df_players["did_play"]]
-        .groupby(["GAME_ID", "TEAM_ID"])
-        .agg(
-            injury_minutes_out=(
-                "player_minutes_played_r5",
-                lambda x: x[df_players.loc[x.index, "injury_absence"]].sum(),
-            ),
-            key_players_out=("is_key_player", "sum"),
-            injury_impact_sum=("injury_impact", "sum"),
-            rest_minutes_out=(
-                "player_minutes_played_r5",
-                lambda x: x[df_players.loc[x.index, "rest_absence"]].sum(),
-            ),
-        )
-        .reset_index()
-    )
-
-    df_team = df_players.merge(team_absences, on=["GAME_ID", "TEAM_ID"], how="left")
-
-    num_cols = df_team.select_dtypes(include="number").columns
-    df_team[num_cols] = df_team[num_cols].fillna(0)
-    df_team = df_team.infer_objects(copy=False)
+    prev_unknown = missing_flags.groupby("TEAM_ID")["absence_unknown"].shift(1).fillna(False).astype(bool)
+    missing_flags.loc[prev_unknown, "prev_game_minutes_out"] = np.nan
+    missing_flags = missing_flags.drop(columns="date")
+    MISSING_COLS = [
+        "pregame_missing_top1", "pregame_missing_top2",
+        "pregame_minutes_out", "pregame_usage_out", "prev_game_minutes_out",
+    ]
 
     counting_cols = [
         "fgm",
@@ -518,6 +368,11 @@ def run(config=None, inputs=None):
 
     team_game["ast_to_to"] = team_game["assists"] / (team_game["turnovers"] + 1e-6)
 
+    # overtime games have ~265 team minutes; flag whether each team's PREVIOUS game went to overtime
+    team_game = team_game.sort_values(["TEAM_ID", "date", "GAME_ID"])
+    team_game["ot_game"] = (team_game["minutes_played"] > 245).astype(int)
+    team_game["after_ot"] = team_game.groupby("TEAM_ID")["ot_game"].shift(1).fillna(0)
+
     team_rolls = rolling_cfg.get("team_rolls", [5, 10])
 
     team_game = team_game.sort_values(["TEAM_ID", "date"])
@@ -526,7 +381,7 @@ def run(config=None, inputs=None):
         for col in ["points", "rebounds", "assists", "three_rate", "ft_rate", "ast_to_to"]:
             team_game[f"{col}_r{r}"] = (
                 team_game.groupby("TEAM_ID")[col].transform(
-                    lambda x: x.rolling(r, min_periods=3).mean()
+                    lambda x: x.shift(1).rolling(r, min_periods=3).mean()
                 )
             )
 
@@ -555,7 +410,6 @@ def run(config=None, inputs=None):
     team_game["bench_net_rating_last_5"] = (
         team_game.groupby("TEAM_ID")["bench_net_rating"]
         .transform(lambda x: x.shift(1).rolling(5, min_periods=3).mean())
-        .fillna(0)
     )
 
     top_n = rolling_cfg.get("top_n_players", 8)
@@ -577,77 +431,13 @@ def run(config=None, inputs=None):
         subset=[f"home_top{top_n}_points_r5", f"away_top{top_n}_points_r5"]
     )
 
-    player_team_agg = (
-        df_players.groupby(["GAME_ID", "TEAM_ID", "team"])
-        .agg(
-            mins_sum=("player_minutes_played_r5", "sum"),
-            pts_sum=("player_points_r5", "sum"),
-            reb_sum=("player_rebounds_r5", "sum"),
-            usage_sum=("player_usage_proxy_r5", "sum"),
-            PLUS_MINUS_sum=("player_PLUS_MINUS_r5", "sum"),
-            fgm_sum=("player_fgm_r5", "sum"),
-            fga_sum=("player_fga_r5", "sum"),
-            three_pm_sum=("player_three_pm_r5", "sum"),
-            three_pa_sum=("player_three_pa_r5", "sum"),
-            oreb_sum=("player_OREB_r5", "sum"),
-            ast_sum=("player_assists_r5", "sum"),
-            stl_sum=("player_STL_r5", "sum"),
-            blk_sum=("player_BLK_r5", "sum"),
-            to_sum=("player_turnovers_r5", "sum"),
-            pts_top3=("player_points_r5", lambda x: x.nlargest(3).sum()),
-            pts_top4=("player_points_r5", lambda x: x.nlargest(4).sum()),
-            pts_top5=("player_points_r5", lambda x: x.nlargest(5).sum()),
-            pts_top6=("player_points_r5", lambda x: x.nlargest(6).sum()),
-            pts_top7=("player_points_r5", lambda x: x.nlargest(7).sum()),
-            pts_top8=("player_points_r5", lambda x: x.nlargest(8).sum()),
-            mins_top3=("player_minutes_played_r5", lambda x: x.nlargest(3).sum()),
-            mins_top4=("player_minutes_played_r5", lambda x: x.nlargest(4).sum()),
-            mins_top5=("player_minutes_played_r5", lambda x: x.nlargest(5).sum()),
-            mins_top6=("player_minutes_played_r5", lambda x: x.nlargest(6).sum()),
-            mins_top7=("player_minutes_played_r5", lambda x: x.nlargest(7).sum()),
-            mins_top8=("player_minutes_played_r5", lambda x: x.nlargest(8).sum()),
-            pts_std=("player_points_r5", "std"),
-        )
-        .reset_index()
-    )
+    home_missing = missing_flags.rename(columns={"team": "home", "absence_unknown": "home_absence_unknown",
+                                                 **{c: f"home_{c}" for c in MISSING_COLS}})
+    away_missing = missing_flags.rename(columns={"team": "away", "absence_unknown": "away_absence_unknown",
+                                                 **{c: f"away_{c}" for c in MISSING_COLS}})
 
-    home_players = (
-        player_team_agg.merge(df_games[["GAME_ID", "home"]], on="GAME_ID")
-        .query("team == home")
-        .drop(columns="team")
-        .add_prefix("home_")
-    )
-
-    away_players = (
-        player_team_agg.merge(df_games[["GAME_ID", "away"]], on="GAME_ID")
-        .query("team == away")
-        .drop(columns="team")
-        .add_prefix("away_")
-    )
-
-    df_model = (
-        df_model.merge(home_players, left_on="GAME_ID", right_on="home_GAME_ID", how="left")
-        .merge(away_players, left_on="GAME_ID", right_on="away_GAME_ID", how="left")
-    )
-
-    home_missing = missing_flags.rename(columns={
-        "team": "home",
-        "missing_top1_flag": "home_missing_top1_flag",
-        "missing_top2_flag": "home_missing_top2_flag",
-        "minutes_lost_last_game": "home_minutes_lost_last_game",
-        "usage_lost_last_game": "home_usage_lost_last_game",
-    })
-
-    away_missing = missing_flags.rename(columns={
-        "team": "away",
-        "missing_top1_flag": "away_missing_top1_flag",
-        "missing_top2_flag": "away_missing_top2_flag",
-        "minutes_lost_last_game": "away_minutes_lost_last_game",
-        "usage_lost_last_game": "away_usage_lost_last_game",
-    })
-
-    df_model = df_model.merge(home_missing, on=["GAME_ID", "home"], how="left")
-    df_model = df_model.merge(away_missing, on=["GAME_ID", "away"], how="left")
+    df_model = df_model.merge(home_missing.drop(columns="TEAM_ID"), on=["GAME_ID", "home"], how="left")
+    df_model = df_model.merge(away_missing.drop(columns="TEAM_ID"), on=["GAME_ID", "away"], how="left")
 
     bench_features = team_game[["GAME_ID", "team", "bench_net_rating_last_5"]].copy()
     home_bench = bench_features.rename(columns={
@@ -662,11 +452,19 @@ def run(config=None, inputs=None):
     df_model = df_model.merge(home_bench, on=["GAME_ID", "home"], how="left")
     df_model = df_model.merge(away_bench, on=["GAME_ID", "away"], how="left")
 
-    df_model["missing_top1_flag"] = df_model["home_missing_top1_flag"].fillna(0) - df_model["away_missing_top1_flag"].fillna(0)
-    df_model["missing_top2_flag"] = df_model["home_missing_top2_flag"].fillna(0) - df_model["away_missing_top2_flag"].fillna(0)
-    df_model["minutes_lost_last_game"] = df_model["home_minutes_lost_last_game"].fillna(0) - df_model["away_minutes_lost_last_game"].fillna(0)
-    df_model["usage_lost_last_game"] = df_model["home_usage_lost_last_game"].fillna(0) - df_model["away_usage_lost_last_game"].fillna(0)
-    df_model["bench_net_rating_last_5"] = df_model["home_bench_net_rating_last_5"].fillna(0) - df_model["away_bench_net_rating_last_5"].fillna(0)
+    unknown = df_model["home_absence_unknown"].fillna(False).astype(bool) | df_model["away_absence_unknown"].fillna(False).astype(bool)
+    for c in MISSING_COLS:
+        df_model[c] = df_model[f"home_{c}"].fillna(0) - df_model[f"away_{c}"].fillna(0)
+        df_model.loc[unknown, c] = np.nan  # backfilled game: absences unknown, not "none"
+    # the game after a backfilled one: its "previous game" absences are unknown too
+    prev_nan = df_model["home_prev_game_minutes_out"].isna() | df_model["away_prev_game_minutes_out"].isna()
+    df_model.loc[prev_nan, "prev_game_minutes_out"] = np.nan
+    ot = team_game[["GAME_ID", "team", "after_ot"]]
+    df_model = df_model.merge(ot.rename(columns={"team": "home", "after_ot": "home_after_ot"}), on=["GAME_ID", "home"], how="left")
+    df_model = df_model.merge(ot.rename(columns={"team": "away", "after_ot": "away_after_ot"}), on=["GAME_ID", "away"], how="left")
+    df_model["after_ot_flag"] = df_model["home_after_ot"].fillna(0) - df_model["away_after_ot"].fillna(0)
+
+    df_model["bench_net_rating_last_5"] = df_model["home_bench_net_rating_last_5"] - df_model["away_bench_net_rating_last_5"]
 
     df_model["top8_points_diff"] = (
         df_model[f"home_top{top_n}_points_r5"] - df_model[f"away_top{top_n}_points_r5"]

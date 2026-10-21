@@ -144,6 +144,9 @@ DENY_EXACT = {
     # Leakage: computed by a prior model run
     "abs_edge", "edge_rank_today", "edge_percentile_last_30_days",
     "model_error_roll_last20",
+    # Leakage: same-game DNPs (boxscore minutes == 0), despite the "last_game" names. "Coach's Decision" DNPs
+    # depend on game flow (corr -0.42 with |margin|), which leaks the ATS result. Inactives alone carry no signal.
+    "minutes_lost_last_game", "usage_lost_last_game", "missing_top1_flag", "missing_top2_flag",
     # Redundant Elo monotonic transforms (trees find nonlinearity natively)
     "abs_elo_diff", "elo_diff_squared", "sigmoid_elo_diff",
     # Manual interactions (trees find these automatically)
@@ -194,9 +197,9 @@ STATIC_FEATURES = [
     "margin_std_last_10", "home_margin_std_last_10", "away_margin_std_last_10",
     # Schedule load
     "top8_points_diff",
-    # Injury / roster
-    "missing_top1_flag", "missing_top2_flag",
-    "minutes_lost_last_game", "usage_lost_last_game",
+    # Injury / roster (pregame-known absences only; see docs/feature-leakage-audit-and-fix-plan.md)
+    "pregame_missing_top1", "pregame_missing_top2",
+    "pregame_minutes_out", "pregame_usage_out", "prev_game_minutes_out",
     # Ratings (short-window, non-dynamic)
     "bench_net_rating_last_5",
     "off_rating_last_5", "def_rating_last_5",
@@ -240,17 +243,6 @@ STATIC_FEATURES = [
     "pyth_win_pct_away",   # Pythagorean W% away team
     "pyth_diff",           # Pythagorean quality differential
 ]
-
-DYNAMIC_PREFIXES = (
-    "home_team_adv_", "away_team_adv_",
-    "home_team_ff_",  "away_team_ff_",
-    "home_team_sc_",  "away_team_sc_",
-    "home_team_usg_", "away_team_usg_",
-    "home_team_misc_","away_team_misc_",
-    "home_team_ptrk_","away_team_ptrk_",
-)
-DYNAMIC_SUFFIXES = ("_r5", "_r10", "_r20", "_ewm5", "_ewm10", "_ewm20", "_s2d")
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -348,7 +340,8 @@ def read_odds() -> pd.DataFrame:
     odds["away"] = odds["away_team"].map(CITY_TO_ABBR)
     odds["home_american"] = pd.to_numeric(odds["spread_home_odds"], errors="coerce")
     odds["away_american"] = pd.to_numeric(odds["spread_away_odds"], errors="coerce")
-    return odds[["date", "home", "away", "home_american", "away_american"]]
+    odds["book_spread"] = -pd.to_numeric(odds["spread_home_points"], errors="coerce")  # home margin the line implies
+    return odds[["date", "home", "away", "home_american", "away_american", "book_spread"]]
 
 
 def load_data() -> pd.DataFrame:
@@ -389,15 +382,22 @@ def load_data() -> pd.DataFrame:
         odds_gid = odds_gid.drop_duplicates("GAME_ID_KEY", keep="last")
 
         df = df.merge(
-            odds_gid[["GAME_ID_KEY", "home_american", "away_american"]],
+            odds_gid[["GAME_ID_KEY", "home_american", "away_american", "book_spread"]],
             on="GAME_ID_KEY", how="left",
         )
     else:
         df["home_american"] = np.nan
         df["away_american"] = np.nan
+        df["book_spread"] = np.nan
 
     # Only games with BOTH real prices are bettable; mirrored/defaulted prices are not market observations
     df["odds_matched"] = df["home_american"].notna() & df["away_american"].notna()
+
+    # Two closing-line sources (Kaggle/SBR in the feature table, BetMGM in all_odds.csv): the model sees their
+    # average (halves book-specific noise); bets are priced AND settled on the BetMGM line (one book, one line).
+    df["spread_kaggle"] = pd.to_numeric(df["spread_signed"], errors="coerce")
+    df["settle_signed"] = (-df["book_spread"]).fillna(df["spread_kaggle"])
+    df["spread_signed"] = ((df["spread_kaggle"] + df["settle_signed"]) / 2).where(df["book_spread"].notna(), df["spread_kaggle"])
 
     # Mirror / default missing prices
     m_h = df["home_american"].isna() & df["away_american"].notna()
@@ -413,6 +413,7 @@ def load_data() -> pd.DataFrame:
     df["payout_away"] = pa.where(pa > 0, DEFAULT_PAYOUT).fillna(DEFAULT_PAYOUT)
 
     df = add_oliver_features(df)
+    df = df[df["spread_signed"].notna()]  # no line: nothing to learn or bet
     df = df.sort_values("GAME_DATE", kind="stable").reset_index(drop=True)
     return df
 
@@ -420,19 +421,14 @@ def load_data() -> pd.DataFrame:
 # ── Feature selection ─────────────────────────────────────────────────────────
 
 def build_features(df: pd.DataFrame) -> list:
-    """Select feature columns using Oliver-curated allowlist. FROZEN except EXTRA_FEATURE_EXCLUSIONS/INCLUSIONS."""
-    # Dynamic columns: rolling team stats from nba-api (all windows/prefixes)
-    dynamic = [
-        c for c in df.columns
-        if c.startswith(DYNAMIC_PREFIXES) and c.endswith(DYNAMIC_SUFFIXES)
-    ]
+    """Select feature columns using Oliver-curated allowlist. FROZEN except EXTRA_FEATURE_EXCLUSIONS/INCLUSIONS.
 
+    The ~210 rolling nba-api team-stat columns (home_team_adv_*_r5 ... _s2d) are no longer included by default:
+    on the leak-free table they measured at noise level and adding them lowered the model's correlation with the
+    market's error (0.046 static only vs 0.021 with them). Add individual ones via EXTRA_FEATURE_INCLUSIONS."""
     deny = DENY_EXACT | set(EXTRA_FEATURE_EXCLUSIONS)
 
-    # Start from curated static allowlist + dynamic columns
-    candidates = sorted(set(
-        [c for c in STATIC_FEATURES if c in df.columns] + dynamic
-    ))
+    candidates = sorted(set(c for c in STATIC_FEATURES if c in df.columns))
 
     features = []
     for c in candidates:
@@ -547,9 +543,10 @@ def compute_roi(preds_df: pd.DataFrame, detail: bool = False):
         scale = scale.reindex(df.index).fillna(1.0)
         df.loc[selected, "_kelly"] *= scale
 
-    did_home_cover = df["home_margin"].values > -df["spread_signed"].values
+    settle = df["settle_signed"].values if "settle_signed" in df.columns else df["spread_signed"].values
+    did_home_cover = df["home_margin"].values > -settle
     covered = np.where(did_home_cover, "HOME", "AWAY")
-    push = df["home_margin"].values == -df["spread_signed"].values
+    push = df["home_margin"].values == -settle
     covered = np.where(push, "PUSH", covered)  # books refund pushes: pnl 0
 
     pnl = np.zeros(len(df))
@@ -607,10 +604,11 @@ def calibrate_sigma(out: pd.DataFrame) -> tuple:
     Each fold's sigma is scaled by the multiplier (>= 1) that best fits cover outcomes in EARLIER folds only,
     so win_prob = norm.cdf(edge / sigma) is calibrated without peeking. Returns (sigma, {fold: multiplier})."""
     edge = (out["pred_ensemble"] + out["spread_signed"]).values
-    cover = (out["home_margin"].values > -out["spread_signed"].values).astype(float)
+    settle = (out["settle_signed"] if "settle_signed" in out.columns else out["spread_signed"]).values
+    cover = (out["home_margin"].values > -settle).astype(float)
     sig = out["sigma_ensemble"].values
     fold = out["fold"].values
-    push = out["home_margin"].values == -out["spread_signed"].values
+    push = out["home_margin"].values == -settle
     ok = np.isfinite(edge) & np.isfinite(sig) & np.isfinite(cover) & ~push
     cal, mults = sig.copy(), {}
     for f in np.unique(fold):
@@ -640,9 +638,14 @@ def _fit_predict(spec, X_tr, y_tr, X_te):
 
 
 def _run_fold(train_df, test_df, features) -> dict:
-    """Fit every model on one walk-forward fold. Returns {model_id: (test preds, sigma, test rmse)}."""
-    X_tr, y_tr = train_df[features], train_df["home_margin"]
+    """Fit every model on one walk-forward fold. Returns {model_id: (test preds, sigma, test rmse)}.
+
+    Models learn the MARKET'S ERROR (home_margin + spread_signed, i.e. how far the result lands from the line)
+    rather than the raw margin, so they don't spend capacity re-learning the line. Predictions are converted back to
+    a home margin (error - spread_signed), so sigma, RMSE and everything downstream are unchanged in meaning."""
+    X_tr, y_tr = train_df[features], train_df["home_margin"] + train_df["spread_signed"]
     X_te, y_te = test_df[features], test_df["home_margin"]
+    line_te = test_df["spread_signed"].values
 
     # Drop columns that are all-NaN in training
     valid_cols = X_tr.columns[X_tr.notna().any()].tolist()
@@ -650,8 +653,8 @@ def _run_fold(train_df, test_df, features) -> dict:
 
     res = {}
     for spec in MODEL_SPECS:
-        p_te = _fit_predict(spec, X_tr, y_tr, X_te)
-        # sigma from out-of-sample residuals: fit on the first 80% of train, score the last 20%
+        p_te = _fit_predict(spec, X_tr, y_tr, X_te) - line_te
+        # sigma from out-of-sample residuals (error-space and margin-space residuals are identical): fit on the first 80% of train, score the last 20%
         cut = int(len(X_tr) * 0.8)
         p_val = _fit_predict(spec, X_tr.iloc[:cut], y_tr.iloc[:cut], X_tr.iloc[cut:])
         sigma = float(np.std(y_tr.iloc[cut:].values - p_val)) or 1.0
@@ -700,7 +703,7 @@ def run_experiment() -> dict:
         [pred_store[s["id"]] for s in MODEL_SPECS], axis=1
     ).notna().any(axis=1)
     out = df.loc[covered_mask, [
-        "GAME_DATE", "home_margin", "spread_signed",
+        "GAME_DATE", "home_margin", "spread_signed", "settle_signed",
         "payout_home", "payout_away", "odds_matched",
     ]].copy()
 

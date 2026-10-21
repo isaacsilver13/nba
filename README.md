@@ -68,13 +68,20 @@ python -m src.research_dashboard.capture_run --run-id r1 --metrics m.json --fold
 Required columns are in `src/research_dashboard/manifest.py` (`ARTIFACTS`). Odds tiers: matched / mirrored / default /
 unmatched; the dashboard defaults to matched-only. Legacy `results.tsv` / `outputs/copilot_*` files appear only behind the
 "legacy / unbundled" toggle (`legacy_dashboard.py`) and share no run ID. Existing pipeline outputs do not yet record a
-per-bet odds tier, so real runs cannot be bundled until that is emitted; `data/sample/` holds a synthetic run
+per-bet odds tier; use `replay_run` below to bundle a real run. `data/sample/` holds a synthetic run
 (`python -m tests.sample_run` regenerates it).
 
 The **Run Comparison** tab compares complete bundles in one table plus full-run model-error, flat-stake uncertainty,
 selected-tier ROI, and full-run return/drawdown charts. Full-run and odds-tier-filtered metrics are labeled separately.
 It keeps reproducibility runs visible and warns when historical bundles lack source/config/data fingerprints or may
 reflect different code, data, calibration, sign, or odds logic; compare only runs with compatible provenance.
+
+## Feature pipeline
+
+`python tools/run_features.py` rebuilds the model table (`data/processed/df_model_3.csv`, ~40 s) from the ingested box
+scores. `python -m src.ingest.dataPrep.pipeline --mode ingest|features|full` is the full entry point; the ingest steps
+download from stats.nba.com and need `nba_api`. See `src/ingest/dataPrep/PIPELINE_README.md`.
+
 ### Capturing a real run (replay)
 
 ```bash

@@ -16,9 +16,15 @@ venv/
 /data/cache/
 /data/logs/
 /data/staging/
+/data/csv/
+/data/holdout/
+/data/sql/
+/data/all_odds.csv
+/data/processed_backup_*/
 
 # Generated model outputs and experiment artifacts
 /outputs/
+/experiments/
 *.tsv
 
 # Keep small checked-in samples and documentation

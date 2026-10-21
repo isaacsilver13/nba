@@ -1,47 +1,24 @@
-"""Orchestrates dataPrep pipeline steps and dynamic imports."""
+"""Orchestrates dataPrep pipeline steps."""
 
-import importlib.util
 import os
 import sys
 
 try:
     from .config import get_config
-    from .steps import fetch_games, calculate_elo_and_rest, fetch_player_boxscores, aggregate_player_to_team, engineer_advanced_features
-    PACKAGE_DIR = os.path.dirname(__file__)
+    from .steps import (
+        fetch_games, calculate_elo_and_rest, fetch_player_boxscores, aggregate_player_to_team, engineer_advanced_features,
+        calculate_travel_fatigue as step5, engineer_rolling_features as step6, finalize_feature_selection as step6a,
+    )
 except ImportError:  # pragma: no cover
     PACKAGE_DIR = os.path.dirname(__file__)
     src_root = os.path.abspath(os.path.join(PACKAGE_DIR, "..", ".."))
     if src_root not in sys.path:
         sys.path.insert(0, src_root)
     from ingest.dataPrep.config import get_config
-    from ingest.dataPrep.steps import fetch_games, calculate_elo_and_rest, fetch_player_boxscores, aggregate_player_to_team, engineer_advanced_features
-
-
-def _load_module(module_name, filename):
-    """Load a step module by filename from the steps directory.
-
-    Parameters
-    ----------
-    module_name : str
-        Logical name for the dynamic module.
-    filename : str
-        Filename of the step module under steps/.
-
-    Returns
-    -------
-    module
-        Loaded Python module object.
-    """
-    file_path = os.path.join(PACKAGE_DIR, "steps", filename)
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-step5 = _load_module("calculate_travel_fatigue", "calculate_travel_fatigue.py")
-step6 = _load_module("engineer_rolling_features", "engineer_rolling_features.py")
-step6a = _load_module("finalize_feature_selection", "finalize_feature_selection.py")
+    from ingest.dataPrep.steps import (
+        fetch_games, calculate_elo_and_rest, fetch_player_boxscores, aggregate_player_to_team, engineer_advanced_features,
+        calculate_travel_fatigue as step5, engineer_rolling_features as step6, finalize_feature_selection as step6a,
+    )
 
 
 def run_pipeline(config=None, mode="full"):
