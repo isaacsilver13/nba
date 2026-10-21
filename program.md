@@ -90,11 +90,12 @@ as diagnostics but do not decide keep/revert. This is the single number that dec
 ## Research directions to explore
 
 > **CURRENT SITUATION (read this first):**
-> Earlier results were produced with backtest bugs (misaligned predictions, wrong edge sign, in-sample sigma) and
-> are archived in `results_archive_pre_fix_2026-10-07.tsv` — do not compare against them. After the fixes the model
-> has at most a small, statistically weak edge (flat ROI about +3% per bet, CI includes zero) and its raw
-> probabilities are overconfident. Improvements must show up as a higher `score`, which means a real, repeatable
-> edge on enough bets. Lower `ensemble_rmse` helps only if it lifts `score`; the market line itself has RMSE about 13.35.
+> Results before 2026-10-08 were produced with backtest bugs and same-game feature leakage (see
+> `docs/feature-leakage-audit-and-fix-plan.md`) — do not compare against them. On the corrected features the model
+> shows no edge over the closing line (flat ROI about 0% per bet, CI roughly ±10%). Improvements must show up as a
+> higher `score`, which means a real, repeatable edge on enough bets. Lower `ensemble_rmse` helps only if it lifts
+> `score`; the market line itself has RMSE about 13.35. Every config is scored on the same folds, so a small `score`
+> gain over many tries is expected by chance alone.
 
 ### Priority 1 — Reduce RMSE (do these first)
 

@@ -8,3 +8,5 @@ streamlit
 plotly
 openai
 pyarrow
+joblib
+nba_api  # ingestion steps and tools/fetch_holdout.py

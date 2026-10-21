@@ -14,8 +14,10 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.research_dashboard.catalog import legacy_entry, list_runs, outputs_dir
-from src.research_dashboard.manifest import ODDS_TIERS
-from src.research_dashboard.views import bet_summary, filter_tiers, reliability
+from src.research_dashboard.manifest import ODDS_TIERS, safe_path
+from src.research_dashboard.views import (
+    bet_summary, chart_gate_message, comparison_table, filter_tiers, reliability,
+)
 
 st.set_page_config(page_title="NBA Research Dashboard", page_icon="🏀", layout="wide")
 
@@ -24,7 +26,7 @@ OUTPUTS = outputs_dir(BASE_DIR)
 
 
 @st.cache_data
-def _runs(outputs: str, _stamp: float):
+def _runs(outputs: str, stamp: float):  # no underscore: Streamlit excludes "_"-prefixed args from the cache key
     return list_runs(Path(outputs))
 
 
@@ -61,6 +63,17 @@ def load_results() -> pd.DataFrame:
     return df
 
 
+def artifact_table(run) -> pd.DataFrame:
+    rows = {}
+    for name, e in run.data.get("artifacts", {}).items():
+        try:
+            mtime = pd.Timestamp(safe_path(run.run_dir, e["path"]).stat().st_mtime, unit="s").strftime("%Y-%m-%d %H:%M")
+        except (OSError, ValueError, KeyError):
+            mtime = "missing"
+        rows[name] = {"path": e.get("path"), "rows": e.get("rows"), "sha256": str(e.get("sha256"))[:12], "modified": mtime}
+    return pd.DataFrame(rows).T
+
+
 # ── Global controls ───────────────────────────────────────────────────────────
 st.title("🏀 NBA Research Dashboard")
 st.caption("Historical research results. Not betting advice or live picks.")
@@ -70,10 +83,10 @@ if st.sidebar.button("Refresh"):
 include_legacy = st.sidebar.toggle("Include legacy / unbundled data", value=False)
 
 runs = _runs(str(OUTPUTS), _stamp())
-tabs = ["Run Health", "Model Quality", "Odds Quality", "Betting Simulation", "Experiment Log"]
+tabs = ["Run Health", "Run Comparison", "Model Quality", "Odds Quality", "Betting Simulation", "Artifacts", "Experiment Log"]
 if include_legacy:
     tabs.append("Legacy / unbundled")
-t_health, t_model, t_odds, t_bets, t_log, *t_legacy = st.tabs(tabs)
+t_health, t_compare, t_model, t_odds, t_bets, t_art, t_log, *t_legacy = st.tabs(tabs)
 
 run = None
 if runs:
@@ -83,12 +96,13 @@ else:
 
 ok = run is not None and run.status == "complete"
 T = load_tables(str(run.run_dir), (run.run_dir / "manifest.json").stat().st_mtime) if ok else {}
+gate_message = chart_gate_message(run.run_id if run else None, run.status if run else None)
 
 
 def need_complete():
     if run is None:
         st.info("No run selected.")
-    else:
+    elif not ok:
         st.warning(f"Run `{run.run_id}` is **{run.status}**; charts are disabled. See Run Health.")
     return ok
 
@@ -102,16 +116,137 @@ with t_health:
         c[0].metric("Status", run.status)
         c[1].metric("Created", run.data.get("created_at", "?"))
         c[2].metric("Folds", len(run.data.get("folds", [])))
+        if run.status == "complete":
+            st.success("Tables and charts are available in Run Comparison, Model Quality, Odds Quality, Betting Simulation, and Artifacts.")
         for p in run.problems:
             st.warning(p)
         if run.data.get("folds"):
             st.subheader("Fold test windows")
             st.dataframe(pd.DataFrame(run.data["folds"]), use_container_width=True)
+        if ok:
+            g = T["predictions"]["game_date"]
+            st.caption(f"Data coverage: {len(g):,} test games, {g.min()} to {g.max()}; "
+                       f"{len(T['bets']):,} bets across all odds tiers.")
         st.subheader("Artifacts")
-        st.dataframe(pd.DataFrame(run.data.get("artifacts", {})).T, use_container_width=True)
+        st.dataframe(artifact_table(run), use_container_width=True)
+        st.caption("Modified = file mtime on disk. A checksum mismatch makes the run partial.")
         st.download_button("Download manifest.json", json.dumps(run.data, indent=2), f"{run.run_id}_manifest.json")
 
-if need_complete():
+with t_compare:
+    complete_runs = [r for r in runs if r.status == "complete"]
+    run_ids = [r.run_id for r in complete_runs]
+    selected_run_ids = st.multiselect("Runs to compare", run_ids, default=run_ids)
+    comparison_tiers = st.multiselect(
+        "Odds quality for betting columns",
+        ODDS_TIERS,
+        default=["matched"],
+        key="comparison_odds_tiers",
+        help="Only columns and charts labeled selected-tier use this filter. Full-run metrics never change with it.",
+    )
+    st.caption(
+        "Historical runs may span code, data, sign, calibration, or odds changes. Compare only runs with compatible "
+        "provenance; duplicate and reproducibility runs remain visible."
+    )
+    if not selected_run_ids:
+        st.info("Select at least one complete run.")
+    elif not comparison_tiers:
+        st.info("Select at least one odds-quality tier for betting comparisons.")
+    else:
+        selected_runs = [r for r in complete_runs if r.run_id in selected_run_ids]
+        comparison = comparison_table(selected_runs, comparison_tiers)
+        fingerprint_columns = ["source_fingerprint", "config_fingerprint", "data_fingerprint"]
+        missing_fingerprints = {c: int(comparison[c].isna().sum()) for c in fingerprint_columns}
+        if any(missing_fingerprints.values()):
+            missing_text = ", ".join(
+                f"{name.removesuffix('_fingerprint')}={count}"
+                for name, count in missing_fingerprints.items()
+                if count
+            )
+            st.warning(
+                f"Incomplete provenance fingerprints among selected runs ({missing_text}). "
+                "Cross-run ranking is exploratory unless source, config, and data fingerprints all match."
+            )
+        display_columns = [
+            "run_id", "created_at", "experiment_id", "source_fingerprint", "config_fingerprint",
+            "data_fingerprint", "run_model_rmse", "run_flat_roi", "run_flat_roi_se", "run_score",
+            "run_compound_return", "run_bets", "run_max_drawdown", "tier_bets", "tier_win_rate",
+            "tier_roi", "tier_coverage", "matched_odds_share", "folds", "data_rows",
+        ]
+        st.dataframe(
+            comparison[display_columns].style.format({
+                "run_model_rmse": "{:.3f}",
+                "run_flat_roi": "{:.1%}",
+                "run_flat_roi_se": "{:.1%}",
+                "run_score": "{:.3f}",
+                "run_compound_return": "{:.1%}",
+                "run_max_drawdown": "{:.1%}",
+                "tier_win_rate": "{:.1%}",
+                "tier_roi": "{:.1%}",
+                "tier_coverage": "{:.1%}",
+                "matched_odds_share": "{:.1%}",
+            }, na_rep="—"),
+            width="stretch",
+            hide_index=True,
+        )
+
+        rmse = comparison.dropna(subset=["run_model_rmse"])
+        if not rmse.empty:
+            st.subheader("Full-run model error (lower is better)")
+            st.plotly_chart(
+                px.bar(rmse, x="run_id", y="run_model_rmse", hover_data=["created_at", "folds", "data_rows"]),
+                width="stretch",
+            )
+
+        flat = comparison.dropna(subset=["run_flat_roi", "run_flat_roi_se"])
+        if flat.empty:
+            st.info("These runs do not expose flat-stake ROI and standard error for an uncertainty chart.")
+        else:
+            st.subheader("Full-run flat-stake ROI with standard error")
+            flat_fig = px.bar(
+                flat,
+                x="run_id",
+                y="run_flat_roi",
+                error_y="run_flat_roi_se",
+                hover_data=["run_score", "run_bets"],
+            )
+            flat_fig.add_hline(y=0, line_dash="dash")
+            flat_fig.update_yaxes(tickformat=".1%")
+            st.plotly_chart(flat_fig, width="stretch")
+
+        tier_returns = comparison.dropna(subset=["tier_roi"])
+        if not tier_returns.empty:
+            st.subheader(f"Selected-tier ROI ({', '.join(comparison_tiers)})")
+            tier_fig = px.bar(
+                tier_returns,
+                x="run_id",
+                y="tier_roi",
+                hover_data=["tier_bets", "tier_win_rate", "tier_coverage", "matched_odds_share"],
+            )
+            tier_fig.add_hline(y=0, line_dash="dash")
+            tier_fig.update_yaxes(tickformat=".1%")
+            st.plotly_chart(tier_fig, width="stretch")
+
+        tradeoff = comparison.dropna(subset=["run_compound_return", "run_max_drawdown"])
+        if not tradeoff.empty:
+            st.subheader("Full-run compound return versus max drawdown")
+            tradeoff_fig = px.scatter(
+                tradeoff,
+                x="run_max_drawdown",
+                y="run_compound_return",
+                size="run_bets",
+                color="run_model_rmse",
+                hover_name="run_id",
+                hover_data=["run_flat_roi", "run_score", "matched_odds_share"],
+            )
+            tradeoff_fig.update_xaxes(tickformat=".1%")
+            tradeoff_fig.update_yaxes(tickformat=".1%")
+            st.plotly_chart(tradeoff_fig, width="stretch")
+
+if gate_message:
+    for tab in (t_model, t_odds, t_bets):
+        with tab:
+            st.warning(gate_message)
+else:
     pred, folds, bets, audit = T["predictions"], T["fold_metrics"], T["bets"], T["odds_audit"]
     d0, d1 = pd.to_datetime(pred["game_date"]).min().date(), pd.to_datetime(pred["game_date"]).max().date()
     dr = st.sidebar.date_input("Game date range", (d0, d1), min_value=d0, max_value=d1)
@@ -152,14 +287,17 @@ if need_complete():
         if bets_f.empty:
             st.info("No bets in the selected range and odds tiers.")
         else:
-            s = bet_summary(bets_f)
+            units = run.read_metrics().get("units")
+            s = bet_summary(bets_f, units)
+            all_tiers = bet_summary(bets, units)
             c = st.columns(5)
             c[0].metric("Bets", s["bets"])
             c[1].metric("Win rate", f"{s['win_rate']:.1%}")
-            c[2].metric("ROI (P&L / staked)", f"{s['roi']:.1%}")
-            c[3].metric("Max drawdown", f"{s['max_drawdown']:.1%}")
+            c[2].metric("ROI (bankroll-weighted)", f"{s['roi']:.1%}")
+            c[3].metric("All-tier max drawdown", f"{all_tiers['max_drawdown']:.1%}")
             c[4].metric("Candidate games", len(audit_f))
-            st.caption("Units: fraction of starting bankroll (1.0). Settled bets only. "
+            st.caption("Bankroll starts at 1.0; Kelly stake and P&L fractions use the bankroll basis recorded for the run. "
+                       "ROI converts them to common bankroll units. Settled bets only. "
                        f"Coverage: {len(bets_f) / max(len(audit_f), 1):.1%} of candidate games bet.")
             b = bets_f.sort_values("game_date")
             st.plotly_chart(px.line(b, x="game_date", y="bankroll", title="Bankroll"), use_container_width=True)
@@ -169,6 +307,13 @@ if need_complete():
             exp = b.groupby("game_date")["kelly_fraction"].sum().reset_index()
             r.plotly_chart(px.bar(exp, x="game_date", y="kelly_fraction", title="Daily exposure"),
                            use_container_width=True)
+
+with t_art:
+    if need_complete():
+        st.caption("Tables behind every number in this run. Downloads are the manifest-declared files, unfiltered.")
+        for name, e in run.data["artifacts"].items():
+            f = safe_path(run.run_dir, e["path"])
+            st.download_button(f"Download {e['path']}", f.read_bytes(), f"{run.run_id}_{e['path']}", key=f"dl_{name}")
 
 with t_log:
     st.caption("Experiment log from results.tsv. These rows are NOT results of the selected run.")
