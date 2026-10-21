@@ -17,7 +17,7 @@ python autorun.py --groq --max-iters 20                 # autoresearch loop, LLM
 ```
 `autorun.py` resolves `experiment.py`, `program.md`, `results.tsv`, and `experiments/` relative to its own location, so it can be invoked from any working directory. Data locations are overridable via `NBA_DATA_DIR` / `NBA_OUTPUTS_DIR` env vars (default `./data`, `./outputs`).
 
-There is no test suite (the only `test_*.py` file is a standalone script under `src/ingest/old/Scripts/`, not part of an automated suite) — verify changes by running the narrowest relevant import, compile, or dry-run check, not by looking for tests to pass.
+Tests: `python -m pytest tests -q` (CI runs them). They need no local data; the slow point-in-time leakage check (`tools/pit_check.py`, ~2 min, needs `data/processed`) runs with `RUN_PIT=1`. After changing feature code, also run `python tools/leak_screen.py` — see `docs/feature-leakage-audit-and-fix-plan.md`.
 
 Do not commit raw or processed datasets, generated outputs, model artifacts, runtime logs, or credentials — small reproducible fixtures belong under `data/sample/`.
 
@@ -33,6 +33,6 @@ This repo's central mechanism is `autorun.py` driving an LLM (Groq or OpenAI, pe
 ## Data pipeline
 
 - `src/ingest/dataPrep/config.py` owns shared DataPrep defaults and per-step overrides; `src/ingest/dataPrep/pipeline.py` owns orchestration; individual steps live under `src/ingest/dataPrep/steps/`.
-- `src/ingest/models/` holds trained model artifacts by name (e.g. `Edge_LightGBM/`); `src/ingest/old/` is prior-generation ingestion code kept for reference, not part of the active pipeline.
+- `experiment.py` is the only model/backtest code. Earlier model scripts (`src/ingest/models/`, `src/ingest/old/`) and autorun snapshots were removed 2026-10-08; they were built on leaky features and are in git history if needed.
 - For lineup ingestion, official boxscore-listed players count as appearances (including DNPs) — don't add a separate player-stat download path for this.
 - Prefer read-through caches and full artifact reconstruction over partial-cache assumptions; check cache completeness, file dates, and column names before re-fetching. Preserve existing cache paths/schemas unless a migration is explicit.

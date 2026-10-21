@@ -1,7 +1,0 @@
-step 1 - get game data (games, scores, spreads, etc)
-step 2 - calculate elo, rest, b2b, and rolling team stats
-step 3 - get player data by game (pts, reb, ast, stl, blk, to, 3pt, fg)
-step 3a - roll player data up into team data by game and transform to get team and opp stats
-step 4 - calculate features including rolling for team and player data, injury + rest too
-step 5 - merge player data with game data
-step 6 - calculate featuers
