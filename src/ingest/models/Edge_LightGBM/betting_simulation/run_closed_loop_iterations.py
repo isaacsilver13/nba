@@ -293,9 +293,9 @@ def run_closed_loop(args: argparse.Namespace) -> Path:
     project_root = _project_root()
     outputs_dir = project_root / "outputs"
 
-    model_script = project_root / "src/ingest/models/Edge LightGBM/model_ensemble_odds_v2026_02_19.py"
-    analysis_script = project_root / "src/ingest/models/Edge LightGBM/betting_simulation/analyze_copilot_outputs_enhanced.py"
-    feedback_script = project_root / "src/ingest/models/Edge LightGBM/betting_simulation/summarize_copilot_analysis_feedback.py"
+    model_script = project_root / "src/ingest/models/Edge_LightGBM/model_ensemble_odds_v2026_02_19.py"
+    analysis_script = project_root / "src/ingest/models/Edge_LightGBM/betting_simulation/analyze_copilot_outputs_enhanced.py"
+    feedback_script = project_root / "src/ingest/models/Edge_LightGBM/betting_simulation/summarize_copilot_analysis_feedback.py"
 
     run_id = args.run_id or _build_run_id()
     run_dir = (project_root / args.output_root / run_id).resolve()
