@@ -5,9 +5,9 @@ then rebuild the feature table, so tools/predict_today.py sees every game throug
     python tools/ingest_daily.py --no-features    # append only; run tools/run_features.py yourself
 
 Why ESPN: stats.nba.com and cdn.nba.com refuse this PC (Akamai 403 / timeouts, 2026-10-21). ESPN's public JSON has the
-schedule, final scores, a closing spread (ESPN BET / DraftKings, core-API odds) and traditional player box scores,
-which is every input the model's features read. NBA-only columns (adv_*, ff_*, sc_* and team_boxscores_v3.csv) stay
-empty for these games; step 3a leaves a game with no V3 row NaN, and no model feature uses them.
+schedule, final scores, a closing spread (ESPN BET / DraftKings, core-API odds) and traditional player box scores.
+team_boxscores_v3.csv gets the NBA team metrics the model reads (four factors, offensive/defensive rating), computed
+from ESPN's team totals (v3_rows); the other V3 metrics stay NaN for these games (step 3a).
 
 - GAME_ID: ESPN has no NBA game id, so new games get 002<yy>9<nnnn> (season's ending year, sequence from 1). Real NBA
   ids end at <yy>01230, so these never collide; a game is "already ingested" by (date, home, away).
@@ -15,7 +15,8 @@ empty for these games; step 3a leaves a game with no V3 row NaN, and no model fe
   ESPN_ID_OFFSET + ESPN athlete id, so a player keeps one id and their rolling form carries across the switch.
 - minutes: ESPN gives whole minutes, written "M:00" (NBA gives M:SS); a team's sum can be off 240 by a minute or two.
 - Box scores are appended before games, so a run that dies in between re-appends the same rows next time and the
-  feature steps' dedupe_player_games drops the copies.
+  feature steps' dedupe_player_games drops the copies. V3 rows come last and are written for any ESPN game that
+  lacks them, so a run that dies before them fills them in next time.
 Raw ESPN responses are cached under data/cache/espn/ once a game is final.
 """
 import argparse
@@ -42,6 +43,9 @@ NBA_TEAMS = {"ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW
              "MIA", "MIL", "MIN", "NOP", "NYK", "OKC", "ORL", "PHI", "PHX", "POR", "SAC", "SAS", "TOR", "UTA", "WAS"}
 ESPN_ID_OFFSET = 10**8  # NBA person ids are < 2e6
 RESCAN_DAYS = 7  # re-read the last week too, for a game that was postponed or not final at the last run
+# NBA V3 value ~ a + b * box-score estimate, least squares on 2022-24 NBA games (tested on 2024-25, see v3_rows):
+POSS_FIT = (5.6798, 0.9330)  # possessions vs mean of the two teams' FGA + 0.44 FTA - OREB + TOV
+OREB_FIT = (0.0628, 0.9068)  # OREB% vs OREB / (OREB + opponent DREB)
 # ESPN box score key -> all_boxscores.csv column ("a-b" keys hold made-attempted)
 STAT_COLS = {"points": "points", "rebounds": "reboundsTotal", "assists": "assists", "turnovers": "turnovers",
              "steals": "steals", "blocks": "blocks", "offensiveRebounds": "reboundsOffensive",
@@ -126,9 +130,63 @@ def _norm(name):
     return " ".join("".join(ch for ch in s if ch.isalnum() or ch == " ").split())
 
 
+def summary(espn_id):
+    return get_json(f"{SITE}/summary", DATA / "cache" / "espn" / "summary" / f"{espn_id}.json", {"event": espn_id})
+
+
+def v3_rows(espn_id, game_id, team_ids):
+    """team_boxscores_v3.csv rows (the columns the model reads) from ESPN's team totals, in the NBA's units/rounding.
+
+    eFG% and FT rate are exact. TOV% = all turnovers (team ones too) / possessions, as the NBA's. The NBA counts
+    possessions and OREB% from play-by-play (team rebounds included), which ESPN does not report, so those use
+    POSS_FIT / OREB_FIT; ratings use the fitted possessions."""
+    sides = {}
+    for team in summary(espn_id)["boxscore"]["teams"]:
+        s = {x["name"]: x["displayValue"] for x in team["statistics"]}
+        t = {k: float(v) for k, v in s.items() if k in ("offensiveRebounds", "defensiveRebounds", "turnovers",
+                                                         "totalTurnovers")}
+        for k, (made, att) in PAIR_COLS.items():
+            t[made], t[att] = map(float, s[k].split("-"))
+        t["pts"] = 2 * t["fieldGoalsMade"] + t["threePointersMade"] + t["freeThrowsMade"]
+        t["poss_est"] = t["fieldGoalsAttempted"] + 0.44 * t["freeThrowsAttempted"] - t["offensiveRebounds"] + t["turnovers"]
+        sides[tricode(team["team"]["abbreviation"])] = t
+    (h, th), (a, ta) = sides.items()
+    poss = POSS_FIT[0] + POSS_FIT[1] * (th["poss_est"] + ta["poss_est"]) / 2
+    rows = []
+    for code, t, o in ((h, th, ta), (a, ta, th)):
+        ortg, drtg = 100 * t["pts"] / poss, 100 * o["pts"] / poss
+        rows.append({
+            "GAME_ID": game_id, "TEAM_ID": team_ids[code], "TEAM_ABBREVIATION": code,
+            "ff_effective_field_goal_percentage": round((t["fieldGoalsMade"] + 0.5 * t["threePointersMade"])
+                                                        / t["fieldGoalsAttempted"], 3),
+            "ff_free_throw_attempt_rate": round(t["freeThrowsAttempted"] / t["fieldGoalsAttempted"], 3),
+            "ff_team_turnover_percentage": round(t["totalTurnovers"] / poss, 3),
+            "ff_offensive_rebound_percentage": round(OREB_FIT[0] + OREB_FIT[1] * t["offensiveRebounds"]
+                                                     / (t["offensiveRebounds"] + o["defensiveRebounds"]), 3),
+            "adv_offensive_rating": round(ortg, 1), "adv_defensive_rating": round(drtg, 1),
+            "adv_net_rating": round(ortg - drtg, 1), "adv_possessions": round(poss)})
+    return rows
+
+
+def write_v3(games, team_ids, proc):
+    """Append V3 rows for every ESPN-sourced game in `games` that has none (backfills, and heals a run that died
+    after the games table was written)."""
+    gid = pd.to_numeric(games["GAME_ID"])
+    have = set(pd.read_csv(proc / "team_boxscores_v3.csv", usecols=["GAME_ID"])["GAME_ID"])
+    todo = games[(gid % 100000 > 90000) & ~gid.isin(have)]
+    if todo.empty:
+        return 0
+    sb = pd.concat([scoreboard(d.date()) for d in pd.to_datetime(todo["date"].unique())], ignore_index=True)
+    todo = todo.merge(sb[["date", "home", "away", "espn_id"]], on=["date", "home", "away"], validate="1:1")
+    append_csv(pd.DataFrame([r for e, g in zip(todo["espn_id"], todo["GAME_ID"]) for r in v3_rows(e, g, team_ids)]),
+               proc / "team_boxscores_v3.csv")
+    print(f"appended V3 team rows for {len(todo)} games")
+    return len(todo)
+
+
 def box_rows(espn_id, game_id, team_ids):
     """all_boxscores.csv rows for one game (every listed player, DNPs included, as the NBA box score lists them)."""
-    j = get_json(f"{SITE}/summary", DATA / "cache" / "espn" / "summary" / f"{espn_id}.json", {"event": espn_id})
+    j = summary(espn_id)
     rows = []
     for team in j["boxscore"]["players"]:
         code = tricode(team["team"]["abbreviation"])
@@ -179,13 +237,16 @@ def append_csv(df, path):
 def ingest(through, data_dir=DATA):
     proc = data_dir / "processed"
     games = pd.read_csv(proc / "nba_games_with_game_id.csv", parse_dates=["date"], date_format="%m/%d/%Y")
+    box_old = pd.read_csv(proc / "all_boxscores.csv", usecols=["TEAM_ID", "team", "PLAYER_ID", "firstName",
+                                                                "familyName", "endpoint_family"], low_memory=False)
+    team_ids = box_old.drop_duplicates("team", keep="last").set_index("team")["TEAM_ID"].to_dict()
     seen = set(zip(games["date"], games["home"], games["away"]))
     days = pd.date_range(games["date"].max() - pd.Timedelta(days=RESCAN_DAYS), through)
     new = pd.concat([scoreboard(d.date()) for d in days], ignore_index=True)
     new = new[[k not in seen for k in zip(new["date"], new["home"], new["away"])]]
     if new.empty:
         print(f"no new completed games through {through}")
-        return 0
+        return write_v3(games, team_ids, proc)
     new = new.sort_values(["date", "espn_id"]).reset_index(drop=True)
     gid = pd.to_numeric(games["GAME_ID"])
     for season, idx in new.groupby("season").groups.items():
@@ -199,9 +260,6 @@ def ingest(through, data_dir=DATA):
     new["whos_favored"] = np.where(home_line.isna(), None, np.where(home_line <= 0, "home", "away"))
     new["regular"], new["id_spread"] = True, 1  # id_spread only gates step 2's filter (0/1 kept)
 
-    box_old = pd.read_csv(proc / "all_boxscores.csv", usecols=["TEAM_ID", "team", "PLAYER_ID", "firstName",
-                                                                "familyName", "endpoint_family"], low_memory=False)
-    team_ids = box_old.drop_duplicates("team", keep="last").set_index("team")["TEAM_ID"].to_dict()
     box = pd.DataFrame([r for e, g in zip(new["espn_id"], new["GAME_ID"]) for r in box_rows(e, g, team_ids)])
     box["PLAYER_ID"] = player_ids(box, box_old)
     lacking = set(new["GAME_ID"]) - set(box.loc[box["minutes"].notna(), "GAME_ID"])
@@ -209,12 +267,14 @@ def ingest(through, data_dir=DATA):
         raise RuntimeError(f"ESPN has no box score yet for GAME_IDs {sorted(lacking)}; rerun later")
 
     append_csv(box, proc / "all_boxscores.csv")  # box scores first: see the module docstring
-    new["date"] = new["date"].map(lambda d: f"{d.month}/{d.day}/{d.year}")  # the table's own date format
-    append_csv(new, proc / "nba_games_with_game_id.csv")
-    print(f"appended {len(new)} games ({new['date'].iloc[0]} .. {new['date'].iloc[-1]}), {len(box):,} player rows; "
+    append_csv(new.assign(date=new["date"].map(lambda d: f"{d.month}/{d.day}/{d.year}")),  # the table's format
+               proc / "nba_games_with_game_id.csv")
+    n_v3 = write_v3(pd.concat([games, new], ignore_index=True), team_ids, proc)
+    print(f"appended {len(new)} games ({new['date'].iloc[0]:%Y-%m-%d} .. {new['date'].iloc[-1]:%Y-%m-%d}), "
+          f"{len(box):,} player rows; "
           f"{home_line.isna().sum()} without a closing line, "
           f"{(box['PLAYER_ID'] >= ESPN_ID_OFFSET).sum()} player rows with an ESPN-only id")
-    return len(new)
+    return len(new) + n_v3
 
 
 def main():

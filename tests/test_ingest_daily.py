@@ -43,5 +43,29 @@ def test_box_rows(monkeypatch):
     assert ing.player_ids(rows, old).tolist() == [201939, ing.ESPN_ID_OFFSET + 2, ing.ESPN_ID_OFFSET + 3]
 
 
+def team(abbr, fg, tp, ft, oreb, dreb, tov, total_tov):
+    stats = {"fieldGoalsMade-fieldGoalsAttempted": fg, "threePointFieldGoalsMade-threePointFieldGoalsAttempted": tp,
+             "freeThrowsMade-freeThrowsAttempted": ft, "offensiveRebounds": oreb, "defensiveRebounds": dreb,
+             "turnovers": tov, "totalTurnovers": total_tov, "fastBreakPoints": "9"}
+    return {"team": {"abbreviation": abbr}, "statistics": [{"name": k, "displayValue": v} for k, v in stats.items()]}
+
+
+def test_v3_rows(monkeypatch):
+    # HOU 124 - OKC 125 (2025-10-21), totals as ESPN reports them
+    teams = [team("HOU", "43-97", "11-39", "27-31", "16", "36", "22", "25"),
+             team("OKC", "44-94", "13-41", "24-29", "12", "37", "15", "15")]
+    monkeypatch.setattr(ing, "summary", lambda _: {"boxscore": {"teams": teams}})
+    hou, okc = ing.v3_rows("401", 22590001, {"HOU": 1, "OKC": 2})
+    est = ((97 + .44 * 31 - 16 + 22) + (94 + .44 * 29 - 12 + 15)) / 2
+    poss = ing.POSS_FIT[0] + ing.POSS_FIT[1] * est
+    assert (hou["TEAM_ABBREVIATION"], hou["TEAM_ID"], hou["adv_possessions"]) == ("HOU", 1, round(poss))
+    assert hou["ff_effective_field_goal_percentage"] == round((43 + 5.5) / 97, 3)
+    assert hou["ff_free_throw_attempt_rate"] == round(31 / 97, 3)
+    assert hou["ff_team_turnover_percentage"] == round(25 / poss, 3)  # team turnovers count
+    assert hou["ff_offensive_rebound_percentage"] == round(ing.OREB_FIT[0] + ing.OREB_FIT[1] * 16 / (16 + 37), 3)
+    assert hou["adv_offensive_rating"] == okc["adv_defensive_rating"] == round(100 * 124 / poss, 1)
+    assert hou["adv_net_rating"] == -okc["adv_net_rating"]
+
+
 def test_game_ids_sit_above_real_nba_ids():
     assert ing.game_id_base(2026) == 22590000 and ing.game_id_base(2027) == 22690000

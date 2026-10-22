@@ -144,7 +144,12 @@ python tools/ingest_daily.py --no-features    # append only
   pregame-absence flags match exactly, and every player maps to their NBA id.
 - **Known differences** from NBA-sourced games:
   - ESPN minutes are whole numbers, so a team's minutes can be off 240 by 1–3.
-  - The NBA-only `adv_*`, `ff_*` and `sc_*` columns and `team_boxscores_v3.csv` stay empty. No model feature reads them.
+  - `team_boxscores_v3.csv` gets only the team metrics the model reads, computed from ESPN's team totals:
+    - The four factors and the offensive, defensive and net ratings.
+    - eFG% and FT rate are exact. TOV% is within 0.002.
+    - The NBA counts possessions and OREB% from play-by-play, so these two use linear fits from 2022-24. On 2025-04
+      games they are unbiased: per-game error is about 1.3 possessions and 0.02 OREB%, and ratings are within 1.4.
+    - The other V3 metrics, and the player-level `adv_*`, `ff_*` and `sc_*` columns, stay NaN.
   - GAME_IDs are `002<yy>9<nnnn>`, because ESPN has no NBA id.
 - **Reruns are safe:** a game is skipped if its (date, home, away) is already in the table. The last 7 days are re-read
   each run, for postponed games.

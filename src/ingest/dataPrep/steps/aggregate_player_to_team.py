@@ -281,10 +281,13 @@ def run(config=None, inputs=None):
             team_v3_norm = team_v3_norm.groupby(["GAME_ID", "team"], as_index=False)[metric_cols].mean()
             team_v3_norm["_has_v3"] = 1
             team_with_opp = team_with_opp.merge(team_v3_norm, on=["GAME_ID", "team"], how="left")
-            has_v3 = team_with_opp.pop("_has_v3").notna()
+            # ESPN-sourced games (tools/ingest_daily.py, GAME_ID ...9xxxx) carry only the metrics ESPN can supply
+            espn = team_with_opp["GAME_ID"].astype(int) % 100000 > 90000
+            has_v3 = team_with_opp.pop("_has_v3").notna() & ~espn
             for col in metric_cols:
-                # a metric missing inside an existing V3 row is filled with 0 as before; a game with NO V3 row
-                # (backfilled from the box-score-only CSV) stays NaN so rolling means skip it instead of averaging in zeros
+                # a metric missing inside an existing NBA V3 row is filled with 0 as before; a game with NO V3 row
+                # (backfilled from the box-score-only CSV) or an ESPN game stays NaN so rolling means skip it instead
+                # of averaging in zeros
                 vals = pd.to_numeric(team_with_opp[col], errors="coerce")
                 team_with_opp[col] = vals.where(~has_v3, vals.fillna(0))
 
