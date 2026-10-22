@@ -94,7 +94,7 @@ python tools/predict_today.py --date 2024-01-04 --check   # also compare with th
 ```
 
 Output: `$NBA_PREDICTIONS_DIR/<YYYY-MM-DD>.json`. The default is `<NBA_OUTPUTS_DIR>/predictions/`, i.e.
-`outputs/predictions/` in this repo, and bet_watch reads the same folder. The file is replaced atomically.
+`outputs/predictions/` in this repo. The file is replaced atomically. The scheduled run (below) POSTs it to bet-watch.
 
 ```json
 {"slate_date": "2024-03-10", "model_version": "margin-noline-df6993e1",
@@ -155,15 +155,51 @@ python tools/ingest_daily.py --no-features    # append only
   each run, for postponed games.
 - Raw responses are cached in `data/cache/espn/`.
 
-**Scheduling** (Windows Task Scheduler, 9:30 CT daily, model only). **Do not register yet.** Register it after the
-root-folder move `nba_prediction` → `codebase`, which changes the paths below:
+**Scheduling: GitHub Actions** (`.github/workflows/daily-predictions.yml`). The PC is not involved:
 
-```bat
-schtasks /Create /TN "NBA predict_today" /SC DAILY /ST 09:30 /TR "cmd /c \"cd /d C:\Users\justj\nba_prediction\repos\nba_prediction && (.venv\Scripts\python.exe tools\ingest_daily.py && .venv\Scripts\python.exe tools\predict_today.py) >> outputs\predict_today.log 2>&1\""
+```
+cron-job.org 09:30 CT -> workflow_dispatch -> restore the newest state-* release -> ingest_daily -> predict_today
+  -> POST outputs/predictions/<date>.json to $BET_WATCH_URL/internal/nba-predictions -> release state-<date>
+GitHub schedule 15:05 and 16:05 UTC (= 10:05/11:05 CDT, 09:05/10:05 CST) = backup trigger
 ```
 
-`/ST` is the PC's local time (Central). Set `NBA_PREDICTIONS_DIR` as a user environment variable (`setx`) only if
-bet_watch should read somewhere other than `outputs\predictions`.
+- **State.** `tools/state.py pack` tars the four inputs the scripts need (`data/processed/nba_games_with_game_id.csv`,
+  `all_boxscores.csv`, `team_boxscores_v3.csv`, `data/raw/arena_locations.csv`, ~30 MB gzipped) into `state.tar.gz`.
+  `all_boxscores.csv` is over GitHub's 100 MB file limit, so the archive is a **release asset** on release
+  `state-YYYY-MM-DD` in the private data repo (`vars.ODDS_DATA_REPO`), newest 14 kept. Everything else is rebuilt each
+  run: `run_features` writes the derived tables, and the ESPN cache is refetched.
+- **Idempotent.** A `state-<today>` release (US/Eastern date) means today is done, so later triggers skip. It is
+  created only after bet-watch accepts the POST, or when there were no games, so a failed run is retried by the backup
+  trigger.
+- **No games:** no file and no POST. The job exits 0 and still saves state.
+- The pip versions in the workflow are pinned to the PC's `.venv`, so `model_version` and the predictions match a local
+  run. Bump them together.
+
+One-time setup (the owner does these):
+
+1. **Seed state** from the PC, with `data/processed` current. Tag it with **yesterday's** date, never today's: a
+   `state-<today>` release tells the workflow today is done.
+   ```bash
+   python tools/state.py pack --out state.tar.gz
+   gh release create state-YYYY-MM-DD state.tar.gz -R isaacsilver13/nba-odds-raw --title state-YYYY-MM-DD --notes seed
+   ```
+2. **Repo secret and variable** (Settings → Secrets and variables → Actions). `ODDS_DATA_REPO` and `ODDS_DATA_TOKEN`
+   already exist for the odds collector; the token's *Contents: Read and write* covers releases.
+   - Secret `BET_WATCH_INTERNAL_SECRET`: bet-watch's `INTERNAL_JOBS_SECRET`.
+   - Variable `BET_WATCH_URL` = `https://bet-watch.fly.dev`.
+3. **cron-job.org job**, set up like the odds collector's (`docs/odds-collector.md` step 7, same dispatch token):
+   `POST https://api.github.com/repos/isaacsilver13/nba/actions/workflows/daily-predictions.yml/dispatches`, body
+   `{"ref":"main"}`, daily at 09:30 America/Chicago, failure notifications on. A successful dispatch returns HTTP 204.
+4. **First run:** `gh workflow run daily-predictions.yml`, then `gh run watch`. Check that bet-watch has the file
+   and that a `state-<today>` release exists.
+
+**Pulling state to the PC.** This **overwrites** the four files under `$NBA_DATA_DIR`:
+
+```bash
+gh release download state-YYYY-MM-DD -R isaacsilver13/nba-odds-raw -p state.tar.gz
+python tools/state.py unpack state.tar.gz
+python tools/run_features.py      # rebuild the derived tables
+```
 
 ### Capturing a real run (replay)
 

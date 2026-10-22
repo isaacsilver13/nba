@@ -177,6 +177,7 @@ def write_v3(games, team_ids, proc):
     if todo.empty:
         return 0
     sb = pd.concat([scoreboard(d.date()) for d in pd.to_datetime(todo["date"].unique())], ignore_index=True)
+    todo = todo.drop(columns="espn_id", errors="ignore")  # ingest()'s new games carry it; the scoreboard's is canonical
     todo = todo.merge(sb[["date", "home", "away", "espn_id"]], on=["date", "home", "away"], validate="1:1")
     append_csv(pd.DataFrame([r for e, g in zip(todo["espn_id"], todo["GAME_ID"]) for r in v3_rows(e, g, team_ids)]),
                proc / "team_boxscores_v3.csv")

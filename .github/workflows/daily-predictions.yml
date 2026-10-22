@@ -1,0 +1,91 @@
+name: Daily predictions
+
+# Triggered at 09:30 CT by cron-job.org via workflow_dispatch; the schedule below is only a backup
+# (15:05/16:05 UTC = 10:05/11:05 CDT, 09:05/10:05 CST). The state-<date> release in the data repo marks a finished
+# day, so later triggers that day do nothing. Setup and operations: README "Daily predictions for bet_watch".
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "5 15,16 * * *"
+
+concurrency:
+  group: daily-predictions
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # Inert until the data repo is configured, like the odds collector.
+    if: vars.ODDS_DATA_REPO != ''
+    runs-on: ubuntu-24.04
+    outputs:
+      date: ${{ steps.today.outputs.date }}
+      done: ${{ steps.today.outputs.done }}
+    steps:
+      - id: today
+        env:
+          GH_TOKEN: ${{ secrets.ODDS_DATA_TOKEN }}
+          REPO: ${{ vars.ODDS_DATA_REPO }}
+        run: |
+          d=$(TZ=America/New_York date +%F)
+          echo "date=$d" >> "$GITHUB_OUTPUT"
+          if gh release view "state-$d" -R "$REPO" > /dev/null 2>&1; then
+            echo "state-$d exists: today's run already finished"
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  predict:
+    needs: check
+    if: needs.check.outputs.done != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      D: ${{ needs.check.outputs.date }}
+      GH_TOKEN: ${{ secrets.ODDS_DATA_TOKEN }}
+      REPO: ${{ vars.ODDS_DATA_REPO }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: .github/workflows/daily-predictions.yml
+      # Only what ingest_daily/run_features/predict_today import, pinned to the PC venv's versions so model_version
+      # and the predictions match a local run. xgboost-cpu = xgboost without the ~300 MB CUDA wheels.
+      - run: >-
+          pip install numpy==2.5.3 pandas==3.0.6 scipy==1.18.1 scikit-learn==1.9.1 lightgbm==4.7.0
+          xgboost-cpu==3.4.1 joblib==1.6.0 requests==2.34.2
+      - name: Restore newest state
+        run: |
+          tag=$(gh release list -R "$REPO" --limit 100 --json tagName \
+                --jq '[.[].tagName | select(startswith("state-"))] | sort | last // empty')
+          [ -n "$tag" ] || { echo "no state-* release in the data repo: seed one (README)"; exit 1; }
+          echo "restoring $tag"
+          gh release download "$tag" -R "$REPO" -p state.tar.gz
+          python tools/state.py unpack state.tar.gz
+      - run: python tools/ingest_daily.py
+      - run: python tools/predict_today.py --date "$D"
+      - name: Send to bet-watch
+        env:
+          URL: ${{ vars.BET_WATCH_URL }}
+          SECRET: ${{ secrets.BET_WATCH_INTERNAL_SECRET }}
+        run: |
+          f="outputs/predictions/$D.json"
+          [ -f "$f" ] || { echo "no predictions for $D (no regular-season games): nothing to send"; exit 0; }
+          [ -n "$URL" ] || { echo "vars.BET_WATCH_URL is not set"; exit 1; }
+          code=$(curl -sS --retry 3 --max-time 120 -o response.txt -w '%{http_code}' -X POST \
+                 -H "X-Internal-Secret: $SECRET" -H "Content-Type: application/json" \
+                 --data-binary "@$f" "$URL/internal/nba-predictions")
+          echo "bet-watch HTTP $code: $(head -c 300 response.txt)"
+          case "$code" in 2??) ;; *) exit 1 ;; esac
+      # Only after a successful send: a failed day leaves no state-<date>, so the backup trigger retries it.
+      - name: Save state, keep the newest 14
+        run: |
+          python tools/state.py pack --out state.tar.gz
+          gh release create "state-$D" state.tar.gz -R "$REPO" --title "state-$D" \
+            --notes "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          gh release list -R "$REPO" --limit 200 --json tagName \
+            --jq '[.[].tagName | select(startswith("state-"))] | sort | reverse | .[14:][]' |
+            while read -r t; do echo "deleting $t"; gh release delete "$t" -R "$REPO" --yes --cleanup-tag; done
