@@ -141,6 +141,21 @@ def test_ats_roll_last20_counts_covers_not_the_wrong_sign(games, target):
     assert np.isclose(out.loc[target, "ats_roll_last20"], expected)
 
 
+def test_ats_roll_last20_skips_games_without_a_line(games, target):
+    g = games[games.GAME_ID == target].iloc[0]
+    last20 = _history(games, g["home"], g["date"]).iloc[-20:]
+    blanked = games.copy()  # the home team's previous game has no line: average the other 19, don't count a push
+    blanked.loc[blanked.GAME_ID == last20["GAME_ID"].iloc[-1], ["spread", "whos_favored"]] = [np.nan, np.nan]
+
+    def cover(r):
+        m = r["score_home"] - r["score_away"] + (-r["spread"] if r["whos_favored"] == "home" else r["spread"])
+        m = m if r["home"] == g["home"] else -m
+        return 1.0 if m > 0 else 0.0 if m < 0 else 0.5
+
+    expected = np.mean([cover(r) for _, r in last20.iloc[:-1].iterrows()])
+    assert np.isclose(run_step2(blanked).loc[target, "home_ats_roll_last20"], expected)
+
+
 def test_pregame_out_excludes_coach_decisions_and_blank_reasons():
     players = pd.DataFrame({
         "GAME_ID": ["0021900001"] * 6, "TEAM_ID": [1] * 6, "PLAYER_ID": range(6), "team": ["TOR"] * 6,

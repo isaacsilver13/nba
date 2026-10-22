@@ -244,9 +244,10 @@ def run(config=None, inputs=None):
 
     long_team = long_team.sort_values(["team", "date"]).reset_index(drop=True)
     long_team["win"] = (long_team["margin"] > 0).astype(int)
-    # team_spread is the team's signed handicap (-7 = favoured by 7): it covers when margin + handicap > 0; push = half
+    # team_spread is the team's signed handicap (-7 = favoured by 7): it covers when margin + handicap > 0; push = half;
+    # no line = NaN, which the rolling mean skips (it used to count as a push)
     ats_margin = long_team["margin"] + long_team["team_spread"]
-    long_team["ats_cover"] = np.where(ats_margin > 0, 1.0, np.where(ats_margin < 0, 0.0, 0.5))
+    long_team["ats_cover"] = np.select([ats_margin > 0, ats_margin < 0, ats_margin == 0], [1.0, 0.0, 0.5], np.nan)
     long_team["blowout_flag"] = (long_team["margin"].abs() >= 15).astype(int)
 
     recent_windows = [3, 5, 7]

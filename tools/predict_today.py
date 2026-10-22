@@ -1,6 +1,6 @@
 """Model margins and home-win probabilities for one day's NBA slate, for bet_watch's 10:00 CT model picks.
 
-    python tools/predict_today.py                             # today's slate (US/Eastern date) from stats.nba.com
+    python tools/predict_today.py                             # today's slate (US/Eastern date) from ESPN
     python tools/predict_today.py --date 2024-03-10           # a past slate (schedule from the local games table)
     python tools/predict_today.py --date 2024-03-10 --check   # also compare with that date's walk-forward fold
 
@@ -127,13 +127,11 @@ def predict(date, schedule=None, hist=None):
 
 
 def live_schedule(D):
-    """Regular-season games on D from stats.nba.com (GAME_ID 002...); the model is trained on regular season only."""
-    sys.path.insert(0, str(ROOT / "src"))
-    from ingest.dataPrep.config import get_config
-    from ingest.dataPrep.steps.fetch_games import fetch_games_for_date
-    g = fetch_games_for_date(D, headers=get_config()["steps"]["step1"]["api"]["headers"], timeout=40)
-    g = g[g["GAME_ID"].astype(str).str.zfill(10).str.startswith("002")]
-    return g.rename(columns={"HOME": "home", "AWAY": "away"})[["GAME_ID", "home", "away"]]
+    """Regular-season games on D from ESPN, the source tools/ingest_daily.py uses (stats.nba.com refuses this PC).
+    The model is trained on regular season only. GAME_IDs are placeholders above any ingested game's."""
+    from ingest_daily import game_id_base, scoreboard
+    g = scoreboard(D.date(), final_only=False)
+    return g.assign(GAME_ID=[game_id_base(s) + 9000 + i for i, s in enumerate(g["season"], 1)])[["GAME_ID", "home", "away"]]
 
 
 def write(payload, out_dir: Path) -> Path:
