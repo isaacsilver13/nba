@@ -88,7 +88,7 @@ download from stats.nba.com and need `nba_api`. See `src/ingest/dataPrep/PIPELIN
 `ModelPicksJob` (daily report plan, step 3a):
 
 ```bash
-python tools/predict_today.py                             # today (US/Eastern date); schedule from stats.nba.com
+python tools/predict_today.py                             # today (US/Eastern date); schedule from ESPN
 python tools/predict_today.py --date 2024-03-10           # a past slate; schedule from the local games table
 python tools/predict_today.py --date 2024-01-04 --check   # also compare with that date's walk-forward fold
 ```
@@ -110,7 +110,8 @@ Output: `$NBA_PREDICTIONS_DIR/<YYYY-MM-DD>.json`. The default is `<NBA_OUTPUTS_D
 - `p_home_win = Φ(pred_margin / s)`, with `s` fit by probit on the walk-forward out-of-sample predictions.
 - `sigma` is their residual SD. P(home covers handicap L) = `Φ((pred_margin + L) / sigma)`.
 - `data_through` is the last completed game the features saw.
-- No regular-season games (or a failed scoreboard fetch): nothing is written, and the script exits 0.
+- No regular-season games: nothing is written, and the script exits 0. A failed ESPN fetch exits non-zero, also
+  without a file.
 
 **Model.** The script uses experiment.py's models, ensemble weights and 2,500-game rolling window, refit each run on
 the newest completed games. It is kept free of the closing line in two ways:
@@ -128,14 +129,37 @@ DATE: today's games get no score, line or box score. `pregame_missing_top1/2`, `
 `pregame_usage_out` are left NaN, because the inactive list comes out 30–90 minutes before tip. `RUN_PIT=1` tests check
 that every other column equals the full build.
 
-**Before it can run live**, the completed-games tables (`data/processed`) must be current through yesterday. The script
-refuses to run if the last completed game is 10–100 or more than 240 days old. Today the tables end 2025-04-13.
+**Daily ingest.** The completed-games tables (`data/processed`) must be current through yesterday: the script refuses
+to run if the last completed game is 10–100 or more than 240 days old. `tools/ingest_daily.py` keeps them current:
+
+```bash
+python tools/ingest_daily.py                  # games from the last ingested date through yesterday, then run_features
+python tools/ingest_daily.py --no-features    # append only
+```
+
+- **Source: ESPN's public JSON.** stats.nba.com and cdn.nba.com refuse this PC (Akamai 403 or timeouts, 2026-10-21).
+- **What it appends:** final regular-season games to `nba_games_with_game_id.csv`, with the closing spread from ESPN's
+  odds (ESPN BET / DraftKings). Player box scores, DNPs included, go to `all_boxscores.csv`.
+- **Checked against NBA data** on 68 games (2025-04-06..13): scores, closing lines, every team counting stat and the
+  pregame-absence flags match exactly, and every player maps to their NBA id.
+- **Known differences** from NBA-sourced games:
+  - ESPN minutes are whole numbers, so a team's minutes can be off 240 by 1–3.
+  - `team_boxscores_v3.csv` gets only the team metrics the model reads, computed from ESPN's team totals:
+    - The four factors and the offensive, defensive and net ratings.
+    - eFG% and FT rate are exact. TOV% is within 0.002.
+    - The NBA counts possessions and OREB% from play-by-play, so these two use linear fits from 2022-24. On 2025-04
+      games they are unbiased: per-game error is about 1.3 possessions and 0.02 OREB%, and ratings are within 1.4.
+    - The other V3 metrics, and the player-level `adv_*`, `ff_*` and `sc_*` columns, stay NaN.
+  - GAME_IDs are `002<yy>9<nnnn>`, because ESPN has no NBA id.
+- **Reruns are safe:** a game is skipped if its (date, home, away) is already in the table. The last 7 days are re-read
+  each run, for postponed games.
+- Raw responses are cached in `data/cache/espn/`.
 
 **Scheduling** (Windows Task Scheduler, 9:30 CT daily, model only). **Do not register yet.** Register it after the
 root-folder move `nba_prediction` → `codebase`, which changes the paths below:
 
 ```bat
-schtasks /Create /TN "NBA predict_today" /SC DAILY /ST 09:30 /TR "cmd /c \"cd /d C:\Users\justj\nba_prediction\repos\nba_prediction && .venv\Scripts\python.exe tools\predict_today.py >> outputs\predict_today.log 2>&1\""
+schtasks /Create /TN "NBA predict_today" /SC DAILY /ST 09:30 /TR "cmd /c \"cd /d C:\Users\justj\nba_prediction\repos\nba_prediction && (.venv\Scripts\python.exe tools\ingest_daily.py && .venv\Scripts\python.exe tools\predict_today.py) >> outputs\predict_today.log 2>&1\""
 ```
 
 `/ST` is the PC's local time (Central). Set `NBA_PREDICTIONS_DIR` as a user environment variable (`setx`) only if
