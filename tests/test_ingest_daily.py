@@ -69,3 +69,16 @@ def test_v3_rows(monkeypatch):
 
 def test_game_ids_sit_above_real_nba_ids():
     assert ing.game_id_base(2026) == 22590000 and ing.game_id_base(2027) == 22690000
+
+
+def test_write_v3_after_new_games(tmp_path, monkeypatch):
+    # ingest() passes games + new, and new already carries espn_id (the merge must not split it into _x/_y)
+    (tmp_path / "team_boxscores_v3.csv").write_text("GAME_ID,TEAM_ID\n", encoding="utf-8")
+    day = pd.Timestamp("2026-10-21")
+    games = pd.DataFrame({"GAME_ID": [21900001, 22690001], "date": [pd.Timestamp("2019-10-22"), day],
+                          "home": ["TOR", "HOU"], "away": ["NOP", "OKC"], "espn_id": [None, "401"]})
+    monkeypatch.setattr(ing, "scoreboard", lambda d: pd.DataFrame(
+        {"date": [day], "home": ["HOU"], "away": ["OKC"], "espn_id": ["401"]}))
+    monkeypatch.setattr(ing, "v3_rows", lambda e, g, t: [{"GAME_ID": g, "TEAM_ID": e}])
+    assert ing.write_v3(games, {}, tmp_path) == 1
+    assert pd.read_csv(tmp_path / "team_boxscores_v3.csv").to_dict("records") == [{"GAME_ID": 22690001, "TEAM_ID": 401}]
