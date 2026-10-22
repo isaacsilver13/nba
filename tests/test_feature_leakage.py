@@ -173,6 +173,27 @@ def test_point_in_time_rebuild_matches_full_build(date):
     assert r.returncode == 0, r.stdout + r.stderr
 
 
+@pytest.mark.skipif(not os.environ.get("RUN_PIT"), reason="slow: set RUN_PIT=1 (needs data/processed built by the current code)")
+@pytest.mark.parametrize("date", ["2022-12-15", "2024-03-10"])
+def test_slate_rows_match_full_build(date):
+    """Slate mode sees no score, line, box score or inactive list for `date`: every other column must equal the full
+    build, so no feature depends on information a 9:30am run could not have."""
+    sys.path.insert(0, str(REPO / "tools"))
+    import run_features
+    slate = run_features.slate_rows(date).set_index("GAME_ID")
+    full = pd.read_csv(run_features.DATA / "processed" / "df_model_3.csv", low_memory=False)
+    full = full[pd.to_datetime(full["date_x"]) == pd.Timestamp(date)]
+    full = full.set_index(run_features._gid(full["GAME_ID"]))
+    assert len(full) and set(full.index) <= set(slate.index)
+    unknown_at_slate_time = {"GAME_ID", "home_margin", "away_margin", "spread", "spread_signed", "is_home_favorite",
+                             *run_features.SAME_DAY_UNKNOWN}
+    assert slate[run_features.SAME_DAY_UNKNOWN].isna().all().all()
+    cols = [c for c in full.select_dtypes("number").columns if c not in unknown_at_slate_time]
+    a, b = full[cols].to_numpy(float), slate.loc[full.index, cols].to_numpy(float)
+    same = np.isclose(a, b, rtol=1e-7, atol=1e-7, equal_nan=True).all(axis=0)
+    assert same.all(), [c for c, ok in zip(cols, same) if not ok]
+
+
 def test_endpoint_families_with_repeated_keys_cannot_multiply_player_rows(tmp_path, monkeypatch):
     import types
     for name in ("nba_api", "nba_api.stats", "nba_api.stats.library", "nba_api.stats.library.http"):

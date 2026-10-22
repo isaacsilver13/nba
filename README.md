@@ -82,6 +82,65 @@ reflect different code, data, calibration, sign, or odds logic; compare only run
 scores. `python -m src.ingest.dataPrep.pipeline --mode ingest|features|full` is the full entry point; the ingest steps
 download from stats.nba.com and need `nba_api`. See `src/ingest/dataPrep/PIPELINE_README.md`.
 
+## Daily predictions for bet_watch
+
+`tools/predict_today.py` writes the model's view of one day's regular-season slate for bet_watch's 10:00 CT
+`ModelPicksJob` (daily report plan, step 3a):
+
+```bash
+python tools/predict_today.py                             # today (US/Eastern date); schedule from stats.nba.com
+python tools/predict_today.py --date 2024-03-10           # a past slate; schedule from the local games table
+python tools/predict_today.py --date 2024-01-04 --check   # also compare with that date's walk-forward fold
+```
+
+Output: `$NBA_PREDICTIONS_DIR/<YYYY-MM-DD>.json`. The default is `<NBA_OUTPUTS_DIR>/predictions/`, i.e.
+`outputs/predictions/` in this repo, and bet_watch reads the same folder. The file is replaced atomically.
+
+```json
+{"slate_date": "2024-03-10", "model_version": "margin-noline-df6993e1",
+ "generated_at": "2026-10-21T14:30:05+00:00", "data_through": "2024-03-09",
+ "games": [{"game_date": "2024-03-10", "home": "MIA", "away": "WAS",
+            "pred_margin": 13.53, "p_home_win": 0.8064, "sigma": 13.97}]}
+```
+
+- `home` and `away` are stats.nba.com tricodes (`GSW`, `NOP`, `NYK`, `SAS`, `UTA`, `WAS`, …). These are bet_watch's
+  NBA `teams.abbr`.
+- `game_date` is the NBA's US/Eastern schedule date.
+- `pred_margin` is home minus away points.
+- `p_home_win = Φ(pred_margin / s)`, with `s` fit by probit on the walk-forward out-of-sample predictions.
+- `sigma` is their residual SD. P(home covers handicap L) = `Φ((pred_margin + L) / sigma)`.
+- `data_through` is the last completed game the features saw.
+- No regular-season games (or a failed scoreboard fetch): nothing is written, and the script exits 0.
+
+**Model.** The script uses experiment.py's models, ensemble weights and 2,500-game rolling window, refit each run on
+the newest completed games. It is kept free of the closing line in two ways:
+- **Excluded features:** the closing spread, the favourite flag, the spread prices (`payout_*`) and the same-day
+  inactive-list features.
+- **Target:** the **raw home margin**. experiment.py learns the market's error and adds the closing spread back, so its
+  predictions contain the close even when `spread_signed` is excluded. That would be look-ahead against a 10am
+  price.
+
+`--check` on a date that starts a walk-forward fold reproduces that fold's predictions exactly. Other dates use a newer
+window, so their predictions differ.
+
+**Slate features.** `python tools/run_features.py --slate DATE` builds the pregame rows from data strictly before
+DATE: today's games get no score, line or box score. `pregame_missing_top1/2`, `pregame_minutes_out` and
+`pregame_usage_out` are left NaN, because the inactive list comes out 30–90 minutes before tip. `RUN_PIT=1` tests check
+that every other column equals the full build.
+
+**Before it can run live**, the completed-games tables (`data/processed`) must be current through yesterday. The script
+refuses to run if the last completed game is 10–100 or more than 240 days old. Today the tables end 2025-04-13.
+
+**Scheduling** (Windows Task Scheduler, 9:30 CT daily, model only). **Do not register yet.** Register it after the
+root-folder move `nba_prediction` → `codebase`, which changes the paths below:
+
+```bat
+schtasks /Create /TN "NBA predict_today" /SC DAILY /ST 09:30 /TR "cmd /c \"cd /d C:\Users\justj\nba_prediction\repos\nba_prediction && .venv\Scripts\python.exe tools\predict_today.py >> outputs\predict_today.log 2>&1\""
+```
+
+`/ST` is the PC's local time (Central). Set `NBA_PREDICTIONS_DIR` as a user environment variable (`setx`) only if
+bet_watch should read somewhere other than `outputs\predictions`.
+
 ### Capturing a real run (replay)
 
 ```bash
