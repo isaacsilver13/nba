@@ -14,6 +14,7 @@ python experiment.py                                   # run one experiment/back
 streamlit run dashboard.py                              # launch dashboard
 python autorun.py --dry-run                             # autoresearch loop, no LLM calls
 python autorun.py --groq --max-iters 20                 # autoresearch loop, LLM-driven config edits
+python tools/predict_today.py [--date D] [--check]      # daily line-free predictions JSON for bet_watch (README)
 ```
 `autorun.py` resolves `experiment.py`, `program.md`, `results.tsv`, and `experiments/` relative to its own location, so it can be invoked from any working directory. Data locations are overridable via `NBA_DATA_DIR` / `NBA_OUTPUTS_DIR` env vars (default `./data`, `./outputs`).
 
