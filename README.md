@@ -1,6 +1,7 @@
 # nba_prediction
 
 This repository contains the NBA model training, backtesting, and dashboard workflow.
+The betting methodology (markets, edge theses, evaluation rules, stages) is in [docs/methodology.md](docs/methodology.md).
 
 ## Quick start
 
