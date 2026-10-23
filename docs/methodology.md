@@ -181,7 +181,7 @@ Written:           (date, before any data in the window is seen)
 |---|---|---|
 | 0 | Forward ledger; confirm the odds collector captures alt lines and props | No free history exists for alt or prop prices, so nothing can be proven without it |
 | 1 | **Market-anchored spread and total curves** from the empirical distribution of (result − closing line), conditioned on spread size and total. Calibrate on 2008–2025, then price forward alt lines against it. **Done 2026-10-23:** curves are calibrated, but the shape thesis is not supported for full-game lines ([results](curves-stage1-results.md)). Curve C is the pricing curve. | Uses data already on disk; tests the shape thesis cheaply; the moneyline falls out at k = 0 |
-| 2 | Early-line moneyline forward test using the stage 1 curve | Strongest existing lead |
+| 2 | Early-line moneyline forward test using the stage 1 curve. **Retrospective gate failed 2026-10-23:** on 2025-26 Kalshi prices, CLV at 06:00 CT was −1.5% and the CLV slope ≈ 0 ([results](stage2-retro-results.md)). Forward ledger not built. | Strongest existing lead |
 | 3 | Minutes projection and player stat distributions → prop ladders. Report low rungs and minutes-risk cases separately | Minutes are the bottleneck for props; reuses stints and box scores |
 | 4 | Joint simulation → P(double-double), logged before tip and scored on calibration only | Needs stage 3's distributions plus their correlation |
 

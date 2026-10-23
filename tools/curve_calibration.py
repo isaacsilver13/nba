@@ -64,15 +64,21 @@ def rung_probs(xs, p, line, d):
     return over / (1 - push)
 
 
+def std_ecdf(train, col, line_col):
+    """Curve C's shape: CDF of training residuals standardized by model B's sd. Returns (cdf, B's coefficients)."""
+    r_tr = (train[col] - train[line_col]).to_numpy(float)
+    bB = fit_scale(r_tr, design(train))
+    z = np.sort(r_tr / np.exp(design(train) @ bB))
+    return (lambda u: np.searchsorted(z, u, side="right") / len(z)), bB
+
+
 def predict(train, test, col, line_col, no_tie):
     r_tr = (train[col] - train[line_col]).to_numpy(float)
     line = test[line_col].to_numpy(float)
     bA = fit_scale(r_tr, np.ones((len(train), 1)))
-    bB = fit_scale(r_tr, design(train))
+    ecdf, bB = std_ecdf(train, col, line_col)
     sdA = np.full(len(test), np.exp(bA[0]))
     sdB = np.exp(design(test) @ bB)
-    z = np.sort(r_tr / np.exp(design(train) @ bB))
-    ecdf = lambda u: np.searchsorted(z, u, side="right") / len(z)
     return {
         "A": pmf(line, sdA, norm.cdf, no_tie),
         "B": pmf(line, sdB, norm.cdf, no_tie),
