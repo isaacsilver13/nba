@@ -112,10 +112,20 @@ def test_slots_for_a_normal_night():
     assert names(slots, "oddsapi") == ["close@1800", "close@2100", "open"]   # 18:00+18:30 share a call
     c = next(s for s in slots if s.key == ("sgo", "2026-10-21", "close@1830"))
     assert (c.opens, c.closes) == (ct(2026, 10, 21, 18, 10), ct(2026, 10, 21, 18, 27))   # tip-20 -> tip-3
-    assert (c.starts_after, c.starts_before) == (ct(2026, 10, 21, 18, 25), ct(2026, 10, 21, 18, 35))
+    assert (c.starts_after, c.starts_before) == (ct(2026, 10, 21, 18, 15), ct(2026, 10, 21, 18, 45))
     settle = next(s for s in slots if s.name == "settle")
     assert settle.finalized and settle.opens == ct(2026, 10, 22, 10)
     assert (settle.starts_after, settle.starts_before) == (ct(2026, 10, 21, 0), ct(2026, 10, 22, 0))
+
+
+def test_sgo_close_window_includes_the_official_tip_when_the_odds_api_time_runs_late():
+    # 2026-10-23 CHI@MIL: Odds API commence 20:10Z, official (SGO) tip 20:00Z; the 5-min pad captured nothing
+    d = date(2026, 10, 23)
+    slots = schedule.slots_for(d, schedule.slate_tips([{"commence_time": "2026-10-23T20:10:00Z"}], d))
+    c = next(s for s in slots if s.provider == "sgo" and s.name.startswith("close@"))
+    official = datetime(2026, 10, 23, 20, tzinfo=UTC)
+    first_tick = c.opens   # the capture's startsAfter is max(starts_after, now)
+    assert max(c.starts_after, first_tick) <= official < c.starts_before
 
 
 def test_slate_tips_skips_malformed_events():
@@ -409,7 +419,7 @@ def test_run_due_captures_logs_and_is_idempotent(tmp_path, monkeypatch):
     assert sgo_row["objects"] == "3" and sgo_row["error"] == ""
     raw = tmp_path / sgo_row["payload_path"]
     env = store.read_raw(raw)
-    assert env["request"]["params"]["startsAfter"] == "2026-10-21T23:25:00Z"
+    assert env["request"]["params"]["startsAfter"] == "2026-10-21T23:15:00Z"
     assert env["request"]["params"]["started"] == "false"
     assert pq.read_table(raw.with_name(raw.name.replace(".json.gz", ".parquet"))).num_rows == 5
     oddsapi_params = next(p for who, p in calls if who == "oddsapi")
