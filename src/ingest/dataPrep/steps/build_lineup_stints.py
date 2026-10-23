@@ -89,6 +89,10 @@ def _period_start(prows, t, roster_ids, names, prev_on):
             if int(r.teamId) != t:
                 continue
             first.setdefault(int(r.personId), "on")
+            in_id = getattr(r, "inPersonId", np.nan)  # ESPN rows name the incoming player by id
+            if pd.notna(in_id):
+                first.setdefault(int(in_id), "in")
+                continue
             m = _SUB_RE.match(str(r.description))
             ids = _lookup(names, m.group(1)) if m else []
             for pid in ids:  # a name clash marks every namesake not already seen playing
@@ -200,12 +204,12 @@ def build_game_stints(pbp, roster):
         p, t_el = batch[0][0], batch[0][1]
         outs = {t: set() for t in teams}
         ins = {t: [] for t in teams}
-        for _, _, t, pid, desc in batch:
+        for _, _, t, pid, desc, in_id in batch:
             m = _SUB_RE.match(str(desc))
-            if not m or t not in on:
+            if t not in on or (pd.isna(in_id) and not m):
                 return f"bad sub '{desc}'"
             outs[t].add(pid)
-            ins[t].append(m.group(1))
+            ins[t].append(int(in_id) if pd.notna(in_id) else m.group(1))
         batch = []
         close(cur, t_el)  # the lineup before this substitution batch ends here
         cur = open_stint(p, t_el)
@@ -217,7 +221,10 @@ def build_game_stints(pbp, roster):
             staying = on[t] - outs[t]
             new = set(staying)
             for nm in ins[t]:
-                cands = _lookup(names[t], nm, staying)
+                if isinstance(nm, int):  # id given: it must be a rostered player not already on court
+                    cands = [nm] if nm in roster_ids[t] and nm not in staying else []
+                else:
+                    cands = _lookup(names[t], nm, staying)
                 if len(cands) != 1:
                     return f"sub-in unresolved '{nm}' ({len(cands)})"
                 new.add(cands[0])
@@ -250,7 +257,7 @@ def build_game_stints(pbp, roster):
                 on[t] = start
             cur = open_stint(p, p0)
         if at == "Substitution":
-            batch.append((p, t_el, int(r.teamId), int(r.personId), r.description))
+            batch.append((p, t_el, int(r.teamId), int(r.personId), r.description, getattr(r, "inPersonId", np.nan)))
             continue
         # score and box-style counts attributed to the stint in force
         if pd.notna(r.scoreHome) and pd.notna(r.scoreAway) and (r.scoreHome + r.scoreAway) >= sum(score.values()):
@@ -266,6 +273,8 @@ def build_game_stints(pbp, roster):
                 c["fta"] += 1
             elif at == "Turnover":
                 c["tov"] += 1
+            elif at == "Rebound" and str(r.subType).lower() == "offensive":  # ESPN labels the rebound outright
+                c["oreb"] += 1
             elif at == "Rebound" and r.personId:
                 m = _OFF_RE.search(str(r.description))
                 if m:
