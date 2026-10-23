@@ -1,8 +1,8 @@
 name: Daily predictions
 
 # Triggered at 09:30 CT by cron-job.org via workflow_dispatch; the schedule below is only a backup
-# (15:05/16:05 UTC = 10:05/11:05 CDT, 09:05/10:05 CST). The state-<date> release in the data repo marks a finished
-# day, so later triggers that day do nothing. Setup and operations: README "Daily predictions for bet_watch".
+# (15:05/16:05 UTC = 10:05/11:05 CDT, 09:05/10:05 CST). A complete-<date>.txt asset in the private
+# state-<date> release marks a finished day. Setup and operations: README "Daily predictions for bet_watch".
 on:
   workflow_dispatch:
   schedule:
@@ -31,9 +31,17 @@ jobs:
         run: |
           d=$(TZ=America/New_York date +%F)
           echo "date=$d" >> "$GITHUB_OUTPUT"
+          visibility=$(gh repo view "$REPO" --json visibility --jq .visibility)
+          [ "$visibility" = "PRIVATE" ] || { echo "ODDS_DATA_REPO must be private"; exit 1; }
           if gh release view "state-$d" -R "$REPO" > /dev/null 2>&1; then
-            echo "state-$d exists: today's run already finished"
-            echo "done=true" >> "$GITHUB_OUTPUT"
+            if [[ "$d" < "2026-10-23" ]] || \
+               gh release view "state-$d" -R "$REPO" --json assets --jq '.assets[].name' |
+                 grep -Fxq "complete-$d.txt"; then
+              echo "state-$d is complete: today's run already finished"
+              echo "done=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "state-$d is incomplete: retrying"
+            fi
           fi
 
   predict:
@@ -59,9 +67,18 @@ jobs:
           xgboost-cpu==3.4.1 joblib==1.6.0 requests==2.34.2
       - name: Restore newest state
         run: |
-          tag=$(gh release list -R "$REPO" --limit 100 --json tagName \
-                --jq '[.[].tagName | select(startswith("state-"))] | sort | last // empty')
-          [ -n "$tag" ] || { echo "no state-* release in the data repo: seed one (README)"; exit 1; }
+          tag=""
+          while read -r candidate; do
+            candidate_date="${candidate#state-}"
+            if [[ "$candidate_date" < "2026-10-23" ]] || \
+               gh release view "$candidate" -R "$REPO" --json assets --jq '.assets[].name' |
+                 grep -Fxq "complete-$candidate_date.txt"; then
+              tag="$candidate"
+              break
+            fi
+          done < <(gh release list -R "$REPO" --limit 100 --json tagName \
+            --jq '[.[].tagName | select(startswith("state-"))] | sort | reverse | .[]')
+          [ -n "$tag" ] || { echo "no complete state-* release in the data repo: seed one (README)"; exit 1; }
           echo "restoring $tag"
           gh release download "$tag" -R "$REPO" -p state.tar.gz
           python tools/state.py unpack state.tar.gz
@@ -80,12 +97,26 @@ jobs:
                  --data-binary "@$f" "$URL/internal/nba-predictions")
           echo "bet-watch HTTP $code: $(head -c 300 response.txt)"
           case "$code" in 2??) ;; *) exit 1 ;; esac
-      # Only after a successful send: a failed day leaves no state-<date>, so the backup trigger retries it.
+      # Only after a successful send: the completion asset is uploaded last, so a partial release is retried.
       - name: Save state, keep the newest 14
         run: |
+          visibility=$(gh repo view "$REPO" --json visibility --jq .visibility)
+          [ "$visibility" = "PRIVATE" ] || { echo "ODDS_DATA_REPO must be private"; exit 1; }
           python tools/state.py pack --out state.tar.gz
-          gh release create "state-$D" state.tar.gz -R "$REPO" --title "state-$D" \
-            --notes "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          assets=(state.tar.gz)
+          prediction_file="outputs/predictions/$D.json"
+          if [ -f "$prediction_file" ]; then
+            cp "$prediction_file" "predictions-$D.json"
+            assets+=("predictions-$D.json")
+          fi
+          if gh release view "state-$D" -R "$REPO" > /dev/null 2>&1; then
+            gh release upload "state-$D" "${assets[@]}" -R "$REPO" --clobber
+          else
+            gh release create "state-$D" "${assets[@]}" -R "$REPO" --title "state-$D" \
+              --notes "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          fi
+          printf 'completed=%s\nforecast=%s\n' "$GITHUB_RUN_ID" "$([ -f "$prediction_file" ] && echo present || echo absent)" > "complete-$D.txt"
+          gh release upload "state-$D" "complete-$D.txt" -R "$REPO" --clobber
           gh release list -R "$REPO" --limit 200 --json tagName \
             --jq '[.[].tagName | select(startswith("state-"))] | sort | reverse | .[14:][]' |
             while read -r t; do echo "deleting $t"; gh release delete "$t" -R "$REPO" --yes --cleanup-tag; done

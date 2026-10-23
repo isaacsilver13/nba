@@ -159,7 +159,8 @@ python tools/ingest_daily.py --no-features    # append only
 
 ```
 cron-job.org 09:30 CT -> workflow_dispatch -> restore the newest state-* release -> ingest_daily -> predict_today
-  -> POST outputs/predictions/<date>.json to $BET_WATCH_URL/internal/nba-predictions -> release state-<date>
+  -> POST outputs/predictions/<date>.json to $BET_WATCH_URL/internal/nba-predictions
+  -> release state-<date> with the forecast JSON in the private data repo
 GitHub schedule 15:05 and 16:05 UTC (= 10:05/11:05 CDT, 09:05/10:05 CST) = backup trigger
 ```
 
@@ -168,9 +169,16 @@ GitHub schedule 15:05 and 16:05 UTC (= 10:05/11:05 CDT, 09:05/10:05 CST) = backu
   `all_boxscores.csv` is over GitHub's 100 MB file limit, so the archive is a **release asset** on release
   `state-YYYY-MM-DD` in the private data repo (`vars.ODDS_DATA_REPO`), newest 14 kept. Everything else is rebuilt each
   run: `run_features` writes the derived tables, and the ESPN cache is refetched.
-- **Idempotent.** A `state-<today>` release (US/Eastern date) means today is done, so later triggers skip. It is
-  created only after bet-watch accepts the POST, or when there were no games, so a failed run is retried by the backup
-  trigger.
+- **Private forecast handoff.** On game days the same `state-YYYY-MM-DD` release also has
+  `predictions-YYYY-MM-DD.json`, copied from the exact JSON accepted by bet-watch. No forecast
+  asset is added on a no-game day. The code repository is public; keep forecast artifacts in
+  the private data repository. The betting aggregator's isolated paper trial can download
+  this release asset with an authenticated `gh` session and verify the slate before intake.
+- **Idempotent.** From 2026-10-23 onward, `complete-YYYY-MM-DD.txt` on the private `state-<today>`
+  release (US/Eastern date) means today is done. It is uploaded last, after bet-watch accepts the
+  POST (or there were no games) and the state and forecast assets upload. A partial release is
+  repaired by the backup trigger using the newest complete state. Earlier releases use the legacy
+  release-exists marker. The workflow checks that `ODDS_DATA_REPO` is private before saving.
 - **No games:** no file and no POST. The job exits 0 and still saves state.
 - The pip versions in the workflow are pinned to the PC's `.venv`, so `model_version` and the predictions match a local
   run. Bump them together.
