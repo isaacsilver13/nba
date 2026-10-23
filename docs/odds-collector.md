@@ -36,12 +36,16 @@ laptop: git pull the data repo into $NBA_DATA_DIR/raw/odds
    whether `open_odds`/`close_odds` are filled, and that no key appears anywhere (`git grep -i <first 6 chars>`).
 7. **cron-job.org** — create a second fine-grained token: *Only select repositories* → `nba_prediction`;
    permissions → *Actions: Read and write*; expiry after 2027-07-01. Then on https://cron-job.org create a job:
-   - URL: `https://api.github.com/repos/isaacsilver13/nba_prediction/actions/workflows/odds-collector.yml/dispatches`
+   - URL: `https://api.github.com/repos/isaacsilver13/nba/actions/workflows/odds-collector.yml/dispatches`
+     (the repo was renamed from `nba_prediction`; a POST to the old name fails instead of following the redirect)
    - Method `POST`; body `{"ref":"main"}`
    - Headers: `Accept: application/vnd.github+json`, `Authorization: Bearer <dispatch token>`,
      `X-GitHub-Api-Version: 2022-11-28`, `Content-Type: application/json`
-   - Schedule: every 5 minutes, hours 14–23 and 0–4, time zone UTC (= 9 AM–11 PM Central all season)
+   - Schedule: every 5 minutes, hours 9–23, time zone **America/Chicago**. That covers the open (10–12 CT), props
+     (15–17 CT), every close window and the next-morning settle slot.
    - Enable failure notifications. A successful dispatch returns HTTP 204.
+   - The live job is cron-job.org job 8613747. On 2026-10-23 it was found disabled, still pointing at the old repo
+     name, with UTC hours entered under a Central time zone (so it fired 2pm–4am CT). All three were fixed that day.
 
 ## Laptop sync
 

@@ -10,7 +10,10 @@ from zoneinfo import ZoneInfo
 CT = ZoneInfo("America/Chicago")
 CLOSE_OPENS = timedelta(minutes=20)   # close window opens this long before tip (first tick captures)...
 CLOSE_ENDS = timedelta(minutes=3)     # ...and ends this long before tip
-SGO_TIP_PAD = timedelta(minutes=5)    # an SGO close requests games starting within tip +/- this
+# An SGO close requests games starting within tip +/- this. Tips come from The Odds API, whose pre-game
+# commence_time runs ~10 min after the official tip that SGO uses (20:10Z vs 20:00Z), so 5 min missed every game.
+# 15 min still separates tip groups 30 min apart.
+SGO_TIP_PAD = timedelta(minutes=15)
 GROUP_SPAN = timedelta(minutes=30)    # Odds API: tips this close to a group's first tip share one call
 MAX_ODDSAPI_CLOSES = 3
 MAX_FAILURES = 3
