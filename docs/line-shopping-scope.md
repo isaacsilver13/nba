@@ -113,3 +113,28 @@ a paid tier or Kalshi-only fair prices with fewer book snapshots.
 2. **Stake size.** It decides whether FanDuel and DraftKings are usable: their fees are waived at ≥ $25 (FanDuel)
    and ≥ $50 singles (DraftKings). Below that, only fee-free books (BetMGM, Caesars) make sense.
 3. **Snapshot schedule:** keep today's or move to the line-shopping schedule above.
+
+## First opportunity-frequency read (2026-10-24, preliminary, not pre-registered)
+
+`python tools/line_shop_ledger.py` (stake $25) on every capture so far:
+- 4 afternoon props snapshots (10/20–10/23) and 4 close snapshots on 10/23, taken 9.7 minutes before tip
+- 26 games, 370 Illinois-book prices; every price had a Kalshi fair value
+
+| | Result |
+|---|---|
+| Each book's mean EV against Kalshi (its margin) | BetMGM −4.9%, Caesars −4.6%, FanDuel −4.5%, DraftKings −4.4%, ESPN BET −4.4% |
+| Best of the 5 Illinois prices per (snapshot, game, side), n = 74 | Net EV ≥ 0% on 5% of sides; ≥ 1% on 6% of props-snapshot sides; **≥ 2% never** |
+| Best price, mean net EV | −3.4% (props), −3.6% (close) |
+| Kalshi fair vs de-vigged book consensus | Same row: mean difference 0.0, sd 0.8 pp. Kalshi is consistent with the books, not a different market. |
+| Best price ≥ 1% EV against the consensus | 1 of 74: SAC +380 at ESPN BET, which was −6.4% against Kalshi, CLV −1.6% |
+
+**Reading:** at 3–5pm CT and at close, line shopping across these five Illinois books almost never beats Kalshi's fair
+price. The best price still carries about a 3.5% margin.
+
+This does not yet cover:
+- mornings (the 10–12 CT open slot is captured from 10/24)
+- prices right after news, such as injury reports or lineup changes
+- props and alternate lines, which have wider holds and more outliers
+- promotions and profit boosts
+
+Re-run after a week of open and close captures before deciding whether to continue.
