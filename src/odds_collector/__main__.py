@@ -95,7 +95,10 @@ def capture(root: Path, slot: schedule.Slot, now: datetime, log: list[dict],
     row = _row(slot, now, request_id=rid)
     after = slot.starts_after if slot.finalized else max(slot.starts_after, now)   # never in-play games
     if slot.provider == "sgo":
-        if store.sgo_objects_this_month(log, now) >= SGO_OBJECT_STOP:
+        used = providers.sgo_objects_used()   # account-wide: the betting app buys from the same 2,500
+        if used is None:
+            used = store.sgo_objects_this_month(log, now)   # unreadable: count only what this log knows
+        if used >= SGO_OBJECT_STOP:
             store.append_log(root, {**row, "outcome": "skipped_quota"})
             return 0
         endpoint = "/v2/events"

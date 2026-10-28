@@ -41,8 +41,8 @@ laptop: git pull the data repo into $NBA_DATA_DIR/raw/odds
    - Method `POST`; body `{"ref":"main"}`
    - Headers: `Accept: application/vnd.github+json`, `Authorization: Bearer <dispatch token>`,
      `X-GitHub-Api-Version: 2022-11-28`, `Content-Type: application/json`
-   - Schedule: every 5 minutes, hours 9–23, time zone **America/Chicago**. That covers the open (10–12 CT), props
-     (15–17 CT), every close window and the next-morning settle slot.
+   - Schedule: every 5 minutes, hours 9–23, time zone **America/Chicago**. That covers the SGO open (10–12 CT) and the
+     next-morning settle slot (10:00–20:00 CT).
    - Enable failure notifications. A successful dispatch returns HTTP 204.
    - The live job is cron-job.org job 8613747. On 2026-10-23 it was found disabled, still pointing at the old repo
      name, with UTC hours entered under a Central time zone (so it fired 2pm–4am CT). All three were fixed that day.
@@ -69,7 +69,16 @@ oddsapi = pd.read_parquet(r"C:\...\data\raw\odds\oddsapi")
 - A failed workflow run means an auth error (401/403: replace the secret) or a capture that was saved but flagged:
   `requests.csv` rows with `outcome=ok` and a non-empty `error` (`partial: ...` = a later SGO page failed,
   `flatten: ...` = parquet could not be built; fix `flatten.py` then `--rebuild-parquet`). Data is still pushed.
-- Quota stops: SGO 2,300 objects per calendar month (counted from `requests.csv`); The Odds API 450 credits.
+- Quota stops: SGO 2,300 objects per calendar month, read from SGO's free `/v2/account/usage` so the betting app's
+  purchases on the same key count (falls back to `requests.csv` when unreadable); The Odds API 450 credits.
+- The Odds API is no longer scheduled here (2026-10-28): the betting app buys NBA from it for the Lines page, CLV and
+  picks, and the two repos share its 500 credits. The collector still calls its free `/events` list to learn each
+  slate's tips, and `--capture oddsapi` remains as a manual smoke test (3 credits).
+- SGO is billed per event, so it gets two buys a night: `open` (10am) and `settle` (next morning). Settle returns
+  every market's `openOdds` and `closeOdds`, player props included, and `closeOdds` is SGO's own close. The earlier
+  3pm "props" and per-tip `close@` SGO slots were dropped 2026-10-27: on the Oct 25-26 captures every line they
+  added had an open and close in settle, and the 10am `openOdds` matched settle's 100%. What is lost is the
+  intraday line path. To get it back, restore those slots in `schedule.slots_for` (about +2 objects per game).
 - If SGO renames fields: fix `src/odds_collector/flatten.py`, then locally
   `python -m src.odds_collector --rebuild-parquet` and commit/push the data repo.
 - To pause collection: disable the cron-job.org job and the workflow (`gh workflow disable odds-collector.yml`).
