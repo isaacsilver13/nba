@@ -15,6 +15,7 @@ from src.odds_collector.schedule import CT
 
 FIXTURES = Path(__file__).parent / "fixtures" / "odds_collector"
 UTC = timezone.utc
+REAL_SGO_OBJECTS_USED = providers.sgo_objects_used   # the autouse fixture below replaces the module attribute
 
 
 @pytest.fixture(autouse=True)
@@ -22,6 +23,11 @@ def no_network(monkeypatch):
     def refuse(*args, **kwargs):
         raise AssertionError("test attempted a network call")
     monkeypatch.setattr("urllib.request.urlopen", refuse)
+
+
+@pytest.fixture(autouse=True)
+def sgo_usage_unreadable(monkeypatch):
+    monkeypatch.setattr(providers, "sgo_objects_used", lambda: None)   # tests count from their own log
 
 
 @pytest.fixture(autouse=True)
@@ -91,8 +97,7 @@ def ct(y, m, d, h, mi=0):
 
 D = date(2026, 10, 21)
 TIPS = [ct(2026, 10, 21, 18), ct(2026, 10, 21, 18), ct(2026, 10, 21, 18, 30), ct(2026, 10, 21, 21)]
-CAPPED_TIPS = ([ct(2026, 10, 21, 12)] + [ct(2026, 10, 21, 15)] * 2 + [ct(2026, 10, 21, 18)] * 3
-               + [ct(2026, 10, 21, 21)] * 2)
+
 
 
 def names(slots, provider=None):
@@ -108,24 +113,12 @@ def test_slate_tips_filters_central_date_and_keeps_one_per_game():
 
 def test_slots_for_a_normal_night():
     slots = schedule.slots_for(D, TIPS)
-    assert names(slots, "sgo") == ["close@1800", "close@1830", "close@2100", "open", "props", "settle"]
-    assert names(slots, "oddsapi") == ["close@1800", "close@2100", "open"]   # 18:00+18:30 share a call
-    c = next(s for s in slots if s.key == ("sgo", "2026-10-21", "close@1830"))
-    assert (c.opens, c.closes) == (ct(2026, 10, 21, 18, 10), ct(2026, 10, 21, 18, 27))   # tip-20 -> tip-3
-    assert (c.starts_after, c.starts_before) == (ct(2026, 10, 21, 18, 15), ct(2026, 10, 21, 18, 45))
+    assert names(slots, "sgo") == ["open", "settle"]   # settle carries open+close for every market
+    assert names(slots, "oddsapi") == []   # the betting app buys NBA from The Odds API; the collector does not
     settle = next(s for s in slots if s.name == "settle")
     assert settle.finalized and settle.opens == ct(2026, 10, 22, 10)
+    assert settle.closes == ct(2026, 10, 22, 20)   # a missed settle has no other source of the close
     assert (settle.starts_after, settle.starts_before) == (ct(2026, 10, 21, 0), ct(2026, 10, 22, 0))
-
-
-def test_sgo_close_window_includes_the_official_tip_when_the_odds_api_time_runs_late():
-    # 2026-10-23 CHI@MIL: Odds API commence 20:10Z, official (SGO) tip 20:00Z; the 5-min pad captured nothing
-    d = date(2026, 10, 23)
-    slots = schedule.slots_for(d, schedule.slate_tips([{"commence_time": "2026-10-23T20:10:00Z"}], d))
-    c = next(s for s in slots if s.provider == "sgo" and s.name.startswith("close@"))
-    official = datetime(2026, 10, 23, 20, tzinfo=UTC)
-    first_tick = c.opens   # the capture's startsAfter is max(starts_after, now)
-    assert max(c.starts_after, first_tick) <= official < c.starts_before
 
 
 def test_slate_tips_skips_malformed_events():
@@ -140,41 +133,26 @@ def test_no_games_no_slots():
     assert schedule.slots_for(D, []) == []
 
 
-def test_props_slot_skipped_when_every_game_tips_before_three():
-    assert "props" not in names(schedule.slots_for(D, [ct(2026, 10, 21, 11), ct(2026, 10, 21, 14, 30)]))
-
-
-def test_oddsapi_closes_capped_at_three_largest_groups():
-    closes = [s for s in schedule.slots_for(D, CAPPED_TIPS) if s.provider == "oddsapi" and s.name.startswith("close")]
-    assert {s.name: s.capped for s in closes} == {
-        "close@1200": True, "close@1500": False, "close@1800": False, "close@2100": False}
-
-
 def test_due_respects_window_done_and_failure_cap():
     slots = schedule.slots_for(D, TIPS)
     now = ct(2026, 10, 21, 17, 45)
-    assert names(schedule.due(slots, [], now)) == ["close@1800", "close@1800"]   # sgo + oddsapi
-    log = [{"provider": "sgo", "slate_date": "2026-10-21", "slot": "close@1800", "outcome": "ok"}]
-    assert [s.key for s in schedule.due(slots, log, now)] == [("oddsapi", "2026-10-21", "close@1800")]
-    log = [{"provider": "oddsapi", "slate_date": "2026-10-21", "slot": "close@1800", "outcome": o}
+    now = ct(2026, 10, 21, 10, 30)
+    assert [s.key for s in schedule.due(slots, [], now)] == [("sgo", "2026-10-21", "open")]
+    log = [{"provider": "sgo", "slate_date": "2026-10-21", "slot": "open", "outcome": "ok"}]
+    assert schedule.due(slots, log, now) == []
+    log = [{"provider": "sgo", "slate_date": "2026-10-21", "slot": "open", "outcome": o}
            for o in ("error", "empty", "skipped_quota")]
-    assert [s.provider for s in schedule.due(slots, log, now)] == ["sgo"]
+    assert schedule.due(slots, log, now) == []   # three failures retire the slot
+    assert [s.name for s in schedule.due(slots, [], ct(2026, 10, 22, 19, 59))] == ["settle"]
+    assert schedule.due(slots, [], ct(2026, 10, 22, 20)) == []
 
 
 def test_missed_reports_closed_windows_once():
     slots = schedule.slots_for(D, TIPS)
     now = ct(2026, 10, 21, 13)
-    assert sorted(s.key for s in schedule.missed(slots, [], now)) == [
-        ("oddsapi", "2026-10-21", "open"), ("sgo", "2026-10-21", "open")]
-    log = [{"provider": p, "slate_date": "2026-10-21", "slot": "open", "outcome": "missed"} for p in ("sgo", "oddsapi")]
+    assert [s.key for s in schedule.missed(slots, [], now)] == [("sgo", "2026-10-21", "open")]
+    log = [{"provider": "sgo", "slate_date": "2026-10-21", "slot": "open", "outcome": "missed"}]
     assert schedule.missed(slots, log, now) == []
-
-
-def test_capped_slot_never_due_but_reported_missed():
-    slots = schedule.slots_for(D, CAPPED_TIPS)
-    capped = next(s for s in slots if s.capped)
-    assert capped not in schedule.due(slots, [], ct(2026, 10, 21, 11, 40))
-    assert capped in schedule.missed(slots, [], ct(2026, 10, 21, 12))
 
 
 def test_dst_end_day_uses_local_wall_clock():
@@ -184,8 +162,8 @@ def test_dst_end_day_uses_local_wall_clock():
     slots = schedule.slots_for(d, tips)
     sgo_open = next(s for s in slots if s.key == ("sgo", "2026-11-01", "open"))
     assert sgo_open.opens.astimezone(UTC) == datetime(2026, 11, 1, 16, tzinfo=UTC)
-    close = next(s for s in slots if s.key == ("sgo", "2026-11-01", "close@1900"))
-    assert close.closes.astimezone(UTC) == datetime(2026, 11, 2, 0, 57, tzinfo=UTC)
+    settle = next(s for s in slots if s.key == ("sgo", "2026-11-01", "settle"))
+    assert settle.opens.astimezone(UTC) == datetime(2026, 11, 2, 16, tzinfo=UTC)   # 10:00 CST the next morning
 
 
 # --- providers -------------------------------------------------------------
@@ -381,7 +359,7 @@ def test_flattened_rows_write_to_parquet(tmp_path):
 
 # --- CLI -------------------------------------------------------------------
 
-NOW = datetime(2026, 10, 21, 23, 15, tzinfo=UTC)   # 18:15 CT: OA2 tips 18:30, OA1 tips 21:00
+NOW = datetime(2026, 10, 21, 15, 15, tzinfo=UTC)   # 10:15 CT: the SGO open slot is due
 
 
 def seed_schedule(root, fetched=NOW):
@@ -413,20 +391,17 @@ def test_run_due_captures_logs_and_is_idempotent(tmp_path, monkeypatch):
     assert cli.run_due(tmp_path, NOW) == 0
     log = store.read_log(tmp_path)
     assert sorted((r["provider"], r["slot"], r["outcome"]) for r in log) == [
-        ("oddsapi", "close@1830", "ok"), ("oddsapi", "open", "missed"),
-        ("sgo", "close@1830", "ok"), ("sgo", "open", "missed"), ("sgo", "props", "missed")]
+        ("sgo", "open", "ok")]
     sgo_row = next(r for r in log if r["provider"] == "sgo" and r["outcome"] == "ok")
     assert sgo_row["objects"] == "3" and sgo_row["error"] == ""
     raw = tmp_path / sgo_row["payload_path"]
     env = store.read_raw(raw)
-    assert env["request"]["params"]["startsAfter"] == "2026-10-21T23:15:00Z"
+    assert env["request"]["params"]["startsAfter"] == "2026-10-21T15:15:00Z"
     assert env["request"]["params"]["started"] == "false"
     assert pq.read_table(raw.with_name(raw.name.replace(".json.gz", ".parquet"))).num_rows == 5
-    oddsapi_params = next(p for who, p in calls if who == "oddsapi")
-    assert oddsapi_params["commenceTimeFrom"] == "2026-10-21T23:15:00Z"   # never in-play games
     n = len(calls)
     assert cli.run_due(tmp_path, NOW + timedelta(minutes=5)) == 0
-    assert len(calls) == n and len(store.read_log(tmp_path)) == 5
+    assert len(calls) == n and len(store.read_log(tmp_path)) == 1
 
 
 def test_captured_at_is_response_time_not_run_start(tmp_path, monkeypatch):
@@ -436,7 +411,7 @@ def test_captured_at_is_response_time_not_run_start(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "utcnow", lambda: later)
     cli.run_due(tmp_path, NOW)
     oks = [r for r in store.read_log(tmp_path) if r["outcome"] == "ok"]
-    assert len(oks) == 2
+    assert len(oks) == 1
     for r in oks:
         assert r["attempted_at_utc"] == cli.iso(NOW)
         assert store.read_raw(tmp_path / r["payload_path"])["captured_at_utc"] == cli.iso(later)
@@ -448,7 +423,7 @@ def test_dry_run_reports_without_network_or_writes(tmp_path, capsys):
     before = {p: p.stat().st_mtime_ns for p in tmp_path.rglob("*")}
     assert cli.run_due(tmp_path, NOW, dry_run=True) == 0
     out = capsys.readouterr().out
-    assert "due sgo 2026-10-21 close@1830" in out and "missed sgo 2026-10-21 open" in out and "stale" in out
+    assert "due sgo 2026-10-21 open" in out and "stale" in out
     assert {p: p.stat().st_mtime_ns for p in tmp_path.rglob("*")} == before
 
 
@@ -457,7 +432,7 @@ def test_auth_failure_exits_nonzero_and_logs_error(tmp_path, monkeypatch):
     fake_providers(monkeypatch, status=401)
     assert cli.run_due(tmp_path, NOW) == 1
     errors = [r for r in store.read_log(tmp_path) if r["outcome"] == "error"]
-    assert {r["provider"] for r in errors} == {"sgo", "oddsapi"} and all(r["http_status"] == "401" for r in errors)
+    assert {r["provider"] for r in errors} == {"sgo"} and all(r["http_status"] == "401" for r in errors)
     assert not list(tmp_path.glob("*/date=*/*"))
 
 
@@ -470,7 +445,7 @@ def test_flatten_failure_keeps_raw_and_logs_ok(tmp_path, monkeypatch):
     monkeypatch.setattr(flatten, "flatten", boom)
     assert cli.run_due(tmp_path, NOW) == 1
     ok = [r for r in store.read_log(tmp_path) if r["outcome"] == "ok"]
-    assert len(ok) == 2 and all(r["error"].startswith("flatten: KeyError") for r in ok)
+    assert len(ok) == 1 and all(r["error"].startswith("flatten: KeyError") for r in ok)
     assert all((tmp_path / r["payload_path"]).exists() for r in ok)
 
 
@@ -516,8 +491,25 @@ def test_quota_guards_skip_requests(tmp_path, monkeypatch):
                                 "slot": "schedule", "outcome": "ok"})
     cli.run_due(tmp_path, NOW)
     assert calls == []
-    assert sorted(r["provider"] for r in store.read_log(tmp_path) if r["outcome"] == "skipped_quota") == [
-        "oddsapi", "sgo"]
+    assert [r["provider"] for r in store.read_log(tmp_path) if r["outcome"] == "skipped_quota"] == ["sgo"]
+
+
+def test_sgo_guard_reads_account_wide_usage_before_the_local_log(tmp_path, monkeypatch):
+    seed_schedule(tmp_path)
+    calls = fake_providers(monkeypatch)
+    monkeypatch.setattr(providers, "sgo_objects_used", lambda: 2300)   # the betting app spent most of it
+    cli.run_due(tmp_path, NOW)
+    assert calls == []
+    assert [r["provider"] for r in store.read_log(tmp_path) if r["outcome"] == "skipped_quota"] == ["sgo"]
+
+
+def test_sgo_objects_used_reads_the_usage_endpoint(monkeypatch):
+    monkeypatch.setenv("SGO_API_KEY", "k")
+    body = {"data": {"rateLimits": {"per-month": {"max-entities": 2500, "current-entities": 1234}}}}
+    monkeypatch.setattr(providers.urllib.request, "urlopen", lambda req, timeout: FakeResp(body))
+    assert REAL_SGO_OBJECTS_USED() == 1234
+    monkeypatch.setattr(providers.urllib.request, "urlopen", lambda req, timeout: FakeResp({"data": {}}))
+    assert REAL_SGO_OBJECTS_USED() is None   # unreadable shape: the caller falls back to its own log
 
 
 def test_schedule_refresh_merges_by_event_id(tmp_path, monkeypatch):
@@ -569,7 +561,7 @@ def test_manual_sgo_capture_uses_the_production_request_shape(tmp_path, monkeypa
     assert cli.main(["--capture", "sgo"]) == 0
     params = calls[0][1]
     assert params["limit"] == "50" and params["_paginate"] is True
-    assert params["startsAfter"] == "2026-10-21T23:15:00Z" and params["startsBefore"] == "2026-10-22T23:15:00Z"
+    assert params["startsAfter"] == "2026-10-21T15:15:00Z" and params["startsBefore"] == "2026-10-22T15:15:00Z"
     assert store.read_log(tmp_path / "raw" / "odds")[0]["slot"] == "manual"
 
 
@@ -582,7 +574,7 @@ def test_rebuild_parquet_matches_original(tmp_path, monkeypatch):
     for p in paths:
         p.unlink()
     assert cli.rebuild_parquet(tmp_path) == 0
-    assert len(paths) == 2 and all(pq.read_table(p).equals(t) for p, t in zip(paths, before))
+    assert len(paths) == 1 and all(pq.read_table(p).equals(t) for p, t in zip(paths, before))
 
 
 def test_outage_before_first_run_still_logs_started_games_missed(tmp_path, monkeypatch):
@@ -594,4 +586,4 @@ def test_outage_before_first_run_still_logs_started_games_missed(tmp_path, monke
     monkeypatch.setattr(providers, "oddsapi_events", lambda: providers.Response(200, {}, [], ""))
     cli.run_due(tmp_path, datetime(2026, 10, 21, 19, 30, tzinfo=UTC))   # 14:30 CT
     missed = {r["slot"] for r in store.read_log(tmp_path) if r["outcome"] == "missed"}
-    assert {"close@1200", "open"} <= missed
+    assert missed == {"open"}
