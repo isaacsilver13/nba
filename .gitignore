@@ -41,3 +41,7 @@ venv/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Large local research captures (Kalshi market dumps, pre-registered lineup snapshots)
+/data/kalshi/
+/data/snapshots_prereg_*/

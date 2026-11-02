@@ -8,6 +8,7 @@ import urllib.request
 from typing import NamedTuple
 
 SGO_URL = "https://api.sportsgameodds.com/v2/events"
+SGO_USAGE_URL = "https://api.sportsgameodds.com/v2/account/usage"
 ODDSAPI_URL = "https://api.the-odds-api.com/v4/sports/basketball_nba"
 TIMEOUT = 20
 SGO_MAX_PAGES = 20   # a stuck cursor must not bill the free tier away page by page
@@ -75,6 +76,17 @@ def sgo_events(params: dict, paginate: bool = True) -> Response:
             why = f"partial: pagination stopped after page {len(pages)} (repeated cursor or page cap)"
             return r._replace(body=pages, error=why)
         seen.add(cursor)
+
+
+def sgo_objects_used() -> int | None:
+    """Objects billed this month to the whole SGO key (the betting app shares it), from the free usage
+    endpoint. None when it cannot be read, so the caller falls back to its own request log."""
+    key = api_key("SGO_API_KEY")
+    r = _shape_error(_get(SGO_USAGE_URL, {"x-api-key": key}, key), dict)
+    try:
+        return int(r.body["data"]["rateLimits"]["per-month"]["current-entities"])
+    except (TypeError, KeyError, ValueError):
+        return None
 
 
 def oddsapi_events() -> Response:
