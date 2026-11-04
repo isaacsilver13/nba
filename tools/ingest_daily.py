@@ -285,7 +285,8 @@ def main():
     a = ap.parse_args()
     through = pd.Timestamp(a.through) if a.through else \
         pd.Timestamp(datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1))
-    if ingest(through) and not a.no_features:
+    # the derived tables are not in the state archive (tools/state.py), so a day with no new games still needs them
+    if (ingest(through) or not (DATA / "processed" / "df_model_3.csv").is_file()) and not a.no_features:
         # the step configs' paths are relative ("data/processed/..."), so run from the data dir's parent
         subprocess.run([sys.executable, str(ROOT / "tools" / "run_features.py")], cwd=DATA.parent, check=True)
 

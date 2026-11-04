@@ -65,7 +65,8 @@ def load_source(source, game_ids):
         df = datalake.read_pandas("player_boxscores", columns=SRC_COLUMNS,
                                   filters=[("game_id", "in", sorted(game_ids))])
         return df, "lake/player_boxscores"
-    return pd.read_csv(SRC, dtype={"game_id": str}), SRC.name
+    # round_trip: the default parser truncates floats to 15 digits, so the csv and lake sources would differ
+    return pd.read_csv(SRC, dtype={"game_id": str}, float_precision="round_trip"), SRC.name
 
 
 def _mmss(minutes):
@@ -84,7 +85,7 @@ def main(argv=None):
 
     games = pd.read_csv(GAMES, dtype={"GAME_ID": str})
     games["GAME_ID"] = games["GAME_ID"].str.zfill(10)
-    box = pd.read_csv(BOX, low_memory=False)
+    box = pd.read_csv(BOX, low_memory=False, float_precision="round_trip")  # rewritten below: don't lose digits
     have = set(box["GAME_ID"].astype(str).str.replace(".0", "", regex=False).str.zfill(10))
     missing = games[~games["GAME_ID"].isin(have)]
     print(f"games without box scores: {len(missing)}")

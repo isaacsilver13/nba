@@ -82,3 +82,18 @@ def test_write_v3_after_new_games(tmp_path, monkeypatch):
     monkeypatch.setattr(ing, "v3_rows", lambda e, g, t: [{"GAME_ID": g, "TEAM_ID": e}])
     assert ing.write_v3(games, {}, tmp_path) == 1
     assert pd.read_csv(tmp_path / "team_boxscores_v3.csv").to_dict("records") == [{"GAME_ID": 22690001, "TEAM_ID": 401}]
+
+
+def test_main_rebuilds_features_when_no_new_games_but_derived_tables_are_missing(tmp_path, monkeypatch):
+    # CI restores state.tar.gz (no df_model_3.csv); a no-new-games day must still produce it for predict_today
+    ran = []
+    monkeypatch.setattr(ing, "DATA", tmp_path)
+    monkeypatch.setattr(ing, "ingest", lambda through: 0)
+    monkeypatch.setattr(ing.subprocess, "run", lambda *a, **k: ran.append(a))
+    monkeypatch.setattr(sys, "argv", ["ingest_daily.py"])
+    ing.main()
+    assert len(ran) == 1
+    (tmp_path / "processed").mkdir()
+    (tmp_path / "processed" / "df_model_3.csv").write_text("GAME_ID\n", encoding="utf-8")
+    ing.main()
+    assert len(ran) == 1  # present and nothing new: no rebuild
