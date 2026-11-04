@@ -1,4 +1,5 @@
-"""Backfill box scores for games the ingestion skipped, from data/csv/player_boxscores.csv.
+"""Backfill box scores for games the ingestion skipped, from the player_boxscores table (Parquet lake, or the old
+data/csv/player_boxscores.csv when no lake exists; see --source).
 
 all_boxscores.csv has no rows for 176 games that exist in the games table: 87 where |margin| == the spread (the old
 push filter dropped them before the box scores were fetched; 34 of them were not pushes at all) and 89 early
@@ -11,16 +12,23 @@ no rows for them; step 3a keeps those metrics NaN instead of 0).
 
 Idempotent: only games missing from all_boxscores.csv are added; a second run does nothing.
 
-    python tools/backfill_boxscores.py [--dry-run]
+    python tools/backfill_boxscores.py [--dry-run] [--source auto|lake|csv]
+
+--source auto (default) reads the lake's player_boxscores when it exists and the CSV otherwise, and says which.
+Run tools/compare_csv_to_lake.py first if you want proof that the two sources are the same data.
 """
 import argparse
 import os
 import shutil
+import sys
 from pathlib import Path
 
 import pandas as pd
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+from src.ingest import datalake  # noqa: E402
+
 DATA = Path(os.environ.get("NBA_DATA_DIR", REPO / "data"))
 GAMES = DATA / "processed" / "nba_games_with_game_id_processed.csv"
 BOX = DATA / "processed" / "all_boxscores.csv"
@@ -38,6 +46,21 @@ RENAME = {
 }
 
 
+# the only player_boxscores columns this tool uses (the lake lets us read just these instead of all 207)
+SRC_COLUMNS = list(dict.fromkeys(["game_id", "player_id", "team_abbreviation", "player_name", "min", *RENAME]))
+
+
+def load_source(source, game_ids):
+    """Source player rows (``SRC_COLUMNS``; the lake path is already limited to ``game_ids``) and a label for the log."""
+    if source not in ("auto", "lake", "csv"):
+        raise ValueError(f"source must be auto, lake or csv, got {source!r}")
+    if source == "lake" or (source == "auto" and "player_boxscores" in datalake.tables()):
+        df = datalake.read_pandas("player_boxscores", columns=SRC_COLUMNS,
+                                  filters=[("game_id", "in", sorted(game_ids))])
+        return df, "lake/player_boxscores"
+    return pd.read_csv(SRC, dtype={"game_id": str}), SRC.name
+
+
 def _mmss(minutes):
     total = float(minutes)
     m, s = int(total), int(round((total - int(total)) * 60))
@@ -46,10 +69,11 @@ def _mmss(minutes):
     return f"{m}:{s:02d}"
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
-    a = ap.parse_args()
+    ap.add_argument("--source", choices=["auto", "lake", "csv"], default="auto")
+    a = ap.parse_args(argv)
 
     games = pd.read_csv(GAMES, dtype={"GAME_ID": str})
     games["GAME_ID"] = games["GAME_ID"].str.zfill(10)
@@ -60,7 +84,7 @@ def main():
     if missing.empty:
         return
 
-    src = pd.read_csv(SRC, dtype={"game_id": str})
+    src, label = load_source(a.source, set(missing["GAME_ID"]))
     src["GAME_ID"] = src["game_id"].str.zfill(10)
     src = src[src["GAME_ID"].isin(set(missing["GAME_ID"]))].drop_duplicates(["GAME_ID", "player_id"]).copy()
 
@@ -70,7 +94,7 @@ def main():
         lambda t: set(t.str.upper()) == set(teams.loc[t.name].str.upper()))
     bad = list(ok[~ok].index)
     src = src[~src["GAME_ID"].isin(bad)]
-    print(f"available in {SRC.name}: {src['GAME_ID'].nunique()} games ({len(src):,} player rows); "
+    print(f"available in {label}: {src['GAME_ID'].nunique()} games ({len(src):,} player rows); "
           f"skipped for team-code mismatch: {len(bad)}; not in source: {len(missing) - src['GAME_ID'].nunique() - len(bad)}")
     if a.dry_run or src.empty:
         return
