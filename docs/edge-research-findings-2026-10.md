@@ -19,8 +19,10 @@ closing spread. Question for both: is there an exploitable edge, measured by CLV
 > The leak-free model has log loss 0.635 vs the market's 0.605 and RMSE 14.2 vs 13.4, so it has no early-price edge.
 > The Elo placebo was never a fair control (Elo is simply a worse forecaster). The CLV SE of ~0.25–0.3% below is for
 > n≈2,700; at n=200 it is ~0.9%, and confirming +1% CLV would take ~1,400 bets for 2 SE. Kalshi results (Spikes 2–3)
-> are unaffected. Spike 1 is kept for the record only. Reproduce the clean run by patching `_run_fold` to fit
-> `home_margin` directly with no `- line_te` offset, then `python tools/encompass_check.py --preds <that csv>`.
+> are unaffected. Spike 1 is kept for the record only. Reproduce the clean run with
+> `python tools/encompass_check.py --raw-target --exclude spread_signed,is_home_favorite --out outputs/oos_raw.csv`
+> (`--raw-target` fits `home_margin` directly, with no `- line_te` offset, so the closing line cannot enter the
+> prediction; no manual patching of `_run_fold` is needed). Add `--preds outputs/oos_raw.csv` to re-report from the cache.
 
 **Bottom line**
 
@@ -111,8 +113,10 @@ through the day: about +4% overnight, about +1.4% by mid-morning, and zero at th
 through tip. Paper-bet EV>3% games at the first price actually available to you, and track CLV against the close.
 At n≈200 bets the CLV SE is ~0.9%, which is NOT enough to tell +1.4% from 0 (that needs ~700 bets for 2 SE).
 
-Reproduce: `python tools/encompass_check.py --exclude spread_signed,is_home_favorite,pregame_missing_top1,pregame_missing_top2,pregame_minutes_out,pregame_usage_out --out outputs/oos_noline.csv`
-(~3 min). Add `--preds outputs/oos_noline.csv` to re-report from the cache. Note: the numbers above were produced
+Reproduce (the retracted run, for the record only): `python tools/encompass_check.py --exclude spread_signed,is_home_favorite,pregame_missing_top1,pregame_missing_top2,pregame_minutes_out,pregame_usage_out --out outputs/oos_noline.csv`
+(~3 min). Add `--preds outputs/oos_noline.csv` to re-report from the cache. Since 2026-11-03 the moneyline section
+REFUSES to run on these preds, because the closing line is inside them (`line_sensitivity` guard); `--allow-line-leak`
+overrides, and the numbers are then meaningless. For a valid run add `--raw-target`. Note: the numbers above were produced
 with the main checkout's working-tree `experiment.py` (uncommitted `settle_signed` changes), not this branch's
 copy.
 
