@@ -54,6 +54,7 @@ TABLE_SOURCES = {
 }
 
 SEASON_PIVOT = 96  # NBA game ids carry the season's start year as 2 digits; the data starts in 1996-97
+SEASON_MIN_START, SEASON_MAX_START = 1996, 2049  # ids outside this range are refused instead of mislabelled
 GAME_ID_RE = r"^[0-9]{10}$"
 SCAN_GROUP = 100  # columns per typeof() scan query
 VERIFY_GROUP = 40  # columns per verification pass
@@ -69,11 +70,15 @@ def default_sql_dir() -> Path:
 
 
 def season_from_game_id(game_id: str) -> str:
-    """``0022000001`` -> ``2020-21``; ``0029900001`` -> ``1999-00``; ``0020000001`` -> ``2000-01``."""
+    """``0022000001`` -> ``2020-21``; ``0029900001`` -> ``1999-00``; ``0020000001`` -> ``2000-01``.
+    Raises ValueError for ids that are malformed or whose season digits fall outside 1996-2049."""
     if len(game_id) != 10 or not game_id.isdigit():
         raise ValueError(f"not a 10-digit game id: {game_id!r}")
     yy = int(game_id[3:5])
     start = (1900 if yy >= SEASON_PIVOT else 2000) + yy
+    if not SEASON_MIN_START <= start <= SEASON_MAX_START:
+        raise ValueError(f"game id {game_id!r} has season digits {yy:02d}, which this tool cannot place between "
+                         f"{SEASON_MIN_START} and {SEASON_MAX_START} (data before 1996-97 is not supported)")
     return f"{start}-{(start + 1) % 100:02d}"
 
 
@@ -134,7 +139,7 @@ def scan_columns(conn: sqlite3.Connection, table: str) -> list[Column]:
 def derive_season_array(game_ids: pa.Array) -> pa.Array:
     """Vectorised ``season_from_game_id`` (one Python call per distinct game id)."""
     uniq = pc.unique(game_ids)
-    labels = pa.array([season_from_game_id(g) for g in uniq.to_pylist()], pa.string())
+    labels = pa.array([season_from_game_id(g) for g in uniq.to_pylist()], pa.string())  # ValueError on a bad id
     return labels.take(pc.index_in(game_ids, value_set=uniq))
 
 
@@ -146,15 +151,19 @@ def _check_game_ids(table: str, ids: pa.Array) -> None:
 
 
 def _chunk_to_arrow(table: str, rows: list[tuple], cols: list[Column]) -> pa.Table:
-    data = list(zip(*rows))
-    arrays = [pa.array(data[i], type=ARROW_TYPES[c.kind]) for i, c in enumerate(cols)]
+    # one column at a time: list(zip(*rows)) would hold a second full copy of the chunk
+    arrays = [pa.array([r[i] for r in rows], type=ARROW_TYPES[c.kind]) for i, c in enumerate(cols)]
     tbl = pa.Table.from_arrays(arrays, names=[c.name for c in cols])
     if "game_id" in tbl.schema.names:
         _check_game_ids(table, tbl.column("game_id").combine_chunks())
     if table in datalake.PARTITIONED and datalake.PARTITION_COL not in tbl.schema.names:
         if "game_id" not in tbl.schema.names:
             raise ConversionError(f"{table}: has neither {datalake.PARTITION_COL} nor game_id to derive it from")
-        tbl = tbl.append_column(datalake.PARTITION_COL, derive_season_array(tbl.column("game_id").combine_chunks()))
+        try:
+            season = derive_season_array(tbl.column("game_id").combine_chunks())
+        except ValueError as exc:
+            raise ConversionError(f"{table}: cannot derive {datalake.PARTITION_COL}: {exc}") from exc
+        tbl = tbl.append_column(datalake.PARTITION_COL, season)
     return tbl
 
 
@@ -196,8 +205,11 @@ def convert(sqlite_path, table: str, root=None, chunk_rows: int = 500_000, max_c
                 rows = cur.fetchmany(per_chunk)
                 if not rows:
                     break
-                datalake.write_table(table, _chunk_to_arrow(table, rows, cols), mode="append", root=staging)
-                written += len(rows)
+                n = len(rows)
+                arrow_chunk = _chunk_to_arrow(table, rows, cols)
+                del rows  # free the Python rows before writing
+                datalake.write_table(table, arrow_chunk, mode="append", root=staging)
+                written += n
                 chunks += 1
                 log(f"  {table}: {written:,}/{total:,} rows")
             if written != total:
@@ -316,10 +328,14 @@ def check_seasons(games_index_sqlite, root=None, tables=("play_by_play",), log=p
         conn.close()
     rep.games_index_rows = len(truth)
     for gid, season in truth.items():
-        if season_from_game_id(gid) != season:
+        try:
+            derived = season_from_game_id(gid)
+        except ValueError:
+            derived = "(unplaceable id)"
+        if derived != season:
             rep.games_index_mismatches += 1
             if len(rep.games_index_examples) < 5:
-                rep.games_index_examples.append([gid, season, season_from_game_id(gid)])
+                rep.games_index_examples.append([gid, season, derived])
     for table in tables:
         try:
             dset = datalake.dataset(table, root)
@@ -348,6 +364,21 @@ def _fmt(n: int) -> str:
     return f"{n / 1e9:.2f} GB" if n >= 1e9 else f"{n / 1e6:.1f} MB"
 
 
+def _load_report(path: Path) -> dict:
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _report_ok(report: dict) -> bool:
+    """True when nothing in the (merged) report records a failure."""
+    for entry in report.get("tables", {}).values():
+        if "error" in entry or ("verify" in entry and not entry["verify"]["ok"]):
+            return False
+    return report.get("seasons", {}).get("ok", True)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sql-dir", type=Path, default=None, help="folder with the .sqlite files (default $NBA_DATA_DIR/sql)")
@@ -363,49 +394,64 @@ def main(argv=None) -> int:
 
     sql_dir = a.sql_dir or default_sql_dir()
     root = a.lake_root or datalake.lake_root()
-    report = {"sql_dir": str(sql_dir), "lake_root": str(root), "tables": {}}
-    failed = False
-    for table in a.tables:
-        src = sql_dir / TABLE_SOURCES[table]
-        entry = report["tables"].setdefault(table, {})
-        try:
-            if not a.verify_only:
-                print(f"converting {table} from {src.name} ...", flush=True)
-                res = convert(src, table, root=root, chunk_rows=a.chunk_rows, max_cells=a.max_cells,
-                              overwrite=a.overwrite)
-                entry["convert"] = asdict(res)
-                print(f"  -> {res.rows:,} rows, {res.chunks} chunks of <= {res.chunk_rows:,}, {_fmt(res.lake_bytes)}, "
-                      f"{res.seconds}s", flush=True)
-            if not a.skip_verify:
-                print(f"verifying {table} ...", flush=True)
-                v = verify(src, table, root=root)
-                entry["verify"] = asdict(v)
-                print(f"  {'OK' if v.ok else 'FAILED'}: {v.checks} checks, {v.rows:,} rows", flush=True)
-                for msg in v.failures:
-                    print(f"    - {msg}")
-                failed |= not v.ok
-        except (ConversionError, FileNotFoundError) as exc:
-            failed = True
-            entry["error"] = str(exc)
-            print(f"  ERROR {table}: {exc}", file=sys.stderr)
-
-    if not a.skip_verify:
-        gi = sql_dir / MAIN_DB
-        if gi.is_file() and "play_by_play" in datalake.tables(root):
-            print("checking derived season_year against games_index ...", flush=True)
-            s = check_seasons(gi, root=root)
-            report["seasons"] = asdict(s) | {"ok": s.ok}
-            print(f"  games_index self-check: {s.games_index_mismatches} mismatches in {s.games_index_rows:,} games")
-            failed |= not s.ok
-
-    sizes = lake_size(root)
-    report["lake_bytes"] = sizes
-    print("lake size: " + ", ".join(f"{k} {_fmt(v)}" for k, v in sizes.items()))
-    report["ok"] = not failed
     path = a.report or root / "_reports" / "sqlite_to_parquet.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(report, indent=2))
-    print(f"report: {path}")
+    prior = _load_report(path)  # keep other tables' results when only some tables are run
+    report = {"sql_dir": str(sql_dir), "lake_root": str(root), "tables": dict(prior.get("tables", {}))}
+    if "seasons" in prior:
+        report["seasons"] = prior["seasons"]
+    if not a.verify_only and "play_by_play" in a.tables:
+        report.pop("seasons", None)  # the lake changes, so the old season check is stale
+    failed = False
+    try:
+        for table in a.tables:
+            src = sql_dir / TABLE_SOURCES[table]
+            # re-converting makes any earlier verification stale; verify-only keeps the earlier convert record
+            entry = {k: v for k, v in report["tables"].get(table, {}).items() if k == "convert"} if a.verify_only else {}
+            report["tables"][table] = entry
+            try:
+                if not a.verify_only:
+                    print(f"converting {table} from {src.name} ...", flush=True)
+                    res = convert(src, table, root=root, chunk_rows=a.chunk_rows, max_cells=a.max_cells,
+                                  overwrite=a.overwrite)
+                    entry["convert"] = asdict(res)
+                    print(f"  -> {res.rows:,} rows, {res.chunks} chunks of <= {res.chunk_rows:,}, "
+                          f"{_fmt(res.lake_bytes)}, {res.seconds}s", flush=True)
+                if not a.skip_verify:
+                    print(f"verifying {table} ...", flush=True)
+                    v = verify(src, table, root=root)
+                    entry["verify"] = asdict(v)
+                    print(f"  {'OK' if v.ok else 'FAILED'}: {v.checks} checks, {v.rows:,} rows", flush=True)
+                    for msg in v.failures:
+                        print(f"    - {msg}")
+                    failed |= not v.ok
+            except (ConversionError, sqlite3.Error, OSError, ValueError) as exc:
+                # one table's problem (bad data, locked file, corrupt DB) must not skip the rest or lose the report
+                failed = True
+                entry["error"] = f"{type(exc).__name__}: {exc}"
+                print(f"  ERROR {table}: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+        if not a.skip_verify:
+            gi = sql_dir / MAIN_DB
+            if gi.is_file() and "play_by_play" in datalake.tables(root):
+                print("checking derived season_year against games_index ...", flush=True)
+                try:
+                    s = check_seasons(gi, root=root)
+                    report["seasons"] = asdict(s) | {"ok": s.ok}
+                    print(f"  games_index self-check: {s.games_index_mismatches} mismatches in "
+                          f"{s.games_index_rows:,} games")
+                    failed |= not s.ok
+                except (sqlite3.Error, OSError, ValueError) as exc:
+                    failed = True
+                    report["seasons"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                    print(f"  ERROR season check: {type(exc).__name__}: {exc}", file=sys.stderr)
+    finally:
+        sizes = lake_size(root)
+        report["lake_bytes"] = sizes
+        report["ok"] = _report_ok(report)
+        print("lake size: " + ", ".join(f"{k} {_fmt(v)}" for k, v in sizes.items()))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report, indent=2))
+        print(f"report: {path}")
     return 1 if failed else 0
 
 

@@ -309,3 +309,94 @@ def test_verify_is_exact_for_integer_sums_above_2_pow_53(tmp_path):
         return t.set_column(t.schema.get_field_index("big"), "big", pa.array(vals, pa.int64()))
     rewrite(f, bump)
     assert any(m.startswith("game_odds.big: sum") for m in s2p.verify(db, "game_odds", log=lambda *_: None).failures)
+
+
+# ---- CLI resilience, report merging, season range ------------------------------------------------------------------
+
+GI_ROWS = [("0029600001", "1996-97"), ("0021900001", "2019-20"), ("0022500001", "2025-26"),
+           ("0029900001", "1999-00"), ("0020000001", "2000-01")]
+
+
+def cli_sql_dir(tmp_path, gi_extra=()):
+    sql = tmp_path / "data" / "sql"
+    sql.mkdir(parents=True, exist_ok=True)
+    make_db(sql / s2p.PBP_DB, "play_by_play", PBP_COLS, pbp_rows(40))
+    con = sqlite3.connect(sql / s2p.MAIN_DB)
+    con.execute("CREATE TABLE games_index (game_id TEXT, season_year TEXT)")
+    con.executemany("INSERT INTO games_index VALUES (?, ?)", GI_ROWS + list(gi_extra))
+    con.execute("CREATE TABLE game_odds (game_id TEXT, decimal_home NUMERIC)")
+    con.executemany("INSERT INTO game_odds VALUES (?, ?)", [("0021900001", 1.5), ("0021900002", 2.5)])
+    con.commit()
+    con.close()
+    return sql
+
+
+def read_report():
+    return json.loads((datalake.lake_root() / "_reports" / "sqlite_to_parquet.json").read_text())
+
+
+def test_cli_keeps_going_after_an_os_error_and_still_writes_the_report(tmp_path, monkeypatch, capsys):
+    cli_sql_dir(tmp_path)
+    real = s2p.convert
+
+    def flaky(src, table, **kw):
+        if table == "games_index":
+            raise PermissionError("file in use by another process")
+        return real(src, table, **kw)
+    monkeypatch.setattr(s2p, "convert", flaky)
+    assert s2p.main(["--tables", "games_index", "game_odds", "play_by_play"]) == 1
+    rep = read_report()
+    assert "PermissionError" in rep["tables"]["games_index"]["error"]
+    assert rep["tables"]["game_odds"]["verify"]["ok"] and rep["tables"]["play_by_play"]["verify"]["ok"]
+    assert rep["ok"] is False
+    assert datalake.tables() == ["game_odds", "play_by_play"]
+
+
+def test_cli_survives_a_corrupt_sqlite_file(tmp_path, capsys):
+    sql = cli_sql_dir(tmp_path)
+    (sql / s2p.PBP_DB).write_bytes(b"this is not a database" * 100)
+    assert s2p.main(["--tables", "game_odds", "play_by_play"]) == 1
+    rep = read_report()
+    assert "DatabaseError" in rep["tables"]["play_by_play"]["error"]
+    assert rep["tables"]["game_odds"]["verify"]["ok"]
+
+
+def test_season_check_counts_an_unplaceable_games_index_id_instead_of_crashing(tmp_path, capsys):
+    cli_sql_dir(tmp_path, gi_extra=[("0028500001", "1985-86")])
+    assert s2p.main(["--tables", "play_by_play"]) == 1
+    seasons = read_report()["seasons"]
+    assert seasons["ok"] is False and seasons["games_index_mismatches"] == 1
+    assert seasons["games_index_examples"] == [["0028500001", "1985-86", "(unplaceable id)"]]
+
+
+def test_report_merges_tables_and_clears_stale_verification(tmp_path, capsys):
+    cli_sql_dir(tmp_path)
+    assert s2p.main(["--tables", "game_odds"]) == 0
+    assert s2p.main(["--tables", "games_index"]) == 0
+    rep = read_report()
+    assert set(rep["tables"]) == {"game_odds", "games_index"}  # the second run kept the first run's result
+    assert s2p.main(["--tables", "game_odds", "--verify-only"]) == 0
+    entry = read_report()["tables"]["game_odds"]
+    assert "convert" in entry and entry["verify"]["ok"]  # verify-only keeps the earlier convert record
+    assert s2p.main(["--tables", "game_odds", "--skip-verify", "--overwrite"]) == 0
+    entry = read_report()["tables"]["game_odds"]
+    assert "convert" in entry and "verify" not in entry  # a re-convert makes the old verification stale
+
+
+@pytest.mark.parametrize("gid,label", [("0029600001", "1996-97"), ("0024900001", "2049-50")])
+def test_season_range_edges_are_accepted(gid, label):
+    assert s2p.season_from_game_id(gid) == label
+
+
+@pytest.mark.parametrize("gid", ["0025000001", "0028500001", "0029500001"])
+def test_ids_outside_1996_2049_are_refused(gid):
+    with pytest.raises(ValueError, match="cannot place"):
+        s2p.season_from_game_id(gid)
+
+
+def test_converter_refuses_unplaceable_ids_and_names_the_table(tmp_path):
+    rows = pbp_rows(10) + [("0028500001", 99, "old", None)]
+    db = make_db(tmp_path / "pbp.sqlite", "play_by_play", PBP_COLS, rows)
+    with pytest.raises(s2p.ConversionError, match=r"play_by_play: cannot derive season_year: game id '0028500001'"):
+        s2p.convert(db, "play_by_play", log=lambda *_: None)
+    assert not datalake.table_path("play_by_play").exists()
