@@ -15,12 +15,25 @@ streamlit run dashboard.py                              # launch dashboard
 python autorun.py --dry-run                             # autoresearch loop, no LLM calls
 python autorun.py --groq --max-iters 20                 # autoresearch loop, LLM-driven config edits
 python tools/predict_today.py [--date D] [--check]      # daily line-free predictions JSON for bet_watch (README)
+python tools/sqlite_to_parquet.py                       # SQLite -> Parquet lake, then verify every table (data/README.md)
+python tools/compare_csv_to_lake.py                     # prove data/csv/*.csv holds nothing the lake lacks
+python tools/spark_lake_check.py                        # optional: Spark vs DuckDB agreement (needs requirements-bigdata.txt + Java 17/21)
 ```
 `autorun.py` resolves `experiment.py`, `program.md`, `results.tsv`, and `experiments/` relative to its own location, so it can be invoked from any working directory. Data locations are overridable via `NBA_DATA_DIR` / `NBA_OUTPUTS_DIR` env vars (default `./data`, `./outputs`).
 
 Tests: `python -m pytest tests -q` (CI runs them). They need no local data; the slow point-in-time leakage check (`tools/pit_check.py`, ~2 min, needs `data/processed`) runs with `RUN_PIT=1`. After changing feature code, also run `python tools/leak_screen.py` — see `docs/feature-leakage-audit-and-fix-plan.md`.
 
 Do not commit raw or processed datasets, generated outputs, model artifacts, runtime logs, or credentials — small reproducible fixtures belong under `data/sample/`.
+
+## Large data
+
+Big tables (play-by-play, box scores, odds, the games index; anything past ~1 GB or a few million rows) live in the partitioned Parquet lake owned by `src/ingest/datalake.py` (`$NBA_DATA_DIR/lake`, layout in `data/README.md`). Do not add new large CSV or SQLite copies.
+
+- Engine ladder: pandas under ~1 GB (always pass `columns=`/`filters=` to `datalake.read_pandas`), then DuckDB (`datalake.duck()`) for large joins and aggregates, and PySpark only if the data outgrows one machine. Spark only reads (`datalake.get_spark()`/`spark_read()`); every lake write goes through `datalake.write_table` (pyarrow).
+- `game_id` is always a 10-character string (leading zeros); `season_year` is the text label (`2019-20`). `write_table` and the converter refuse numeric ids.
+- Convert in chunks: the machine runs near its memory limit. `tools/sqlite_to_parquet.py` already does, and verifies row counts, null counts and column sums against the SQLite source.
+- DuckDB and PySpark are optional (`requirements-bigdata.txt`). Tests must pass without data, DuckDB, PySpark or Java: skip with `pytest.importorskip`, and keep real Spark runs opt-in (`RUN_SPARK=1`).
+- `experiment.py` (its `FROZEN` section and the paths it reads) and the small `data/processed` pipeline CSVs stay as they are; `data/cache/boxscores/` keeps its layout (no migration without an explicit decision).
 
 ## Architecture: the autoresearch loop
 

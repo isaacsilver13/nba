@@ -35,6 +35,7 @@ Real experiments require the processed dataset described in the [operations guid
 ## Where to start
 
 - [Development and operations](docs/operations-guide.md): data paths, training, run capture, forecasts, and scheduling.
+- [Parquet lake for large tables](data/README.md#parquet-lake): layout, conversion from SQLite, and which engine to use.
 - [Odds collector](docs/odds-collector.md): forward-only collection and operational setup.
 - [Feature pipeline](src/ingest/dataPrep/PIPELINE_README.md): ingestion and feature-building entry points.
 - [Research rules](program.md): experiment constraints. Machine-managed history in that file is not a performance guarantee.
