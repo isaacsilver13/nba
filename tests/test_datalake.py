@@ -350,3 +350,17 @@ def test_prefer_lake_policy():
     assert use is True and "no CSV fallback" in msg
     _report({"game_odds": {"verify": {"ok": True}}})
     assert datalake.prefer_lake("game_odds", csv_exists=True) == (True, "")
+
+
+def test_windows_without_winutils_is_detected(monkeypatch, tmp_path):
+    monkeypatch.delenv("HADOOP_HOME", raising=False)
+    monkeypatch.delenv("hadoop.home.dir", raising=False)
+    monkeypatch.setattr(datalake.sys, "platform", "linux")
+    assert not datalake._windows_hadoop_missing()  # Linux/macOS need nothing
+    monkeypatch.setattr(datalake.sys, "platform", "win32")
+    assert datalake._windows_hadoop_missing()
+    monkeypatch.setenv("HADOOP_HOME", str(tmp_path))
+    assert datalake._windows_hadoop_missing()  # folder set but no bin/winutils.exe
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "winutils.exe").write_bytes(b"")
+    assert not datalake._windows_hadoop_missing()

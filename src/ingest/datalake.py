@@ -293,6 +293,17 @@ def _java_available() -> bool:
     return shutil.which("java") is not None
 
 
+def _windows_hadoop_missing() -> bool:
+    """True on native Windows when Hadoop's winutils.exe is not under $HADOOP_HOME/bin.
+
+    Spark reads local files through Hadoop, and on Windows Hadoop needs winutils.exe + hadoop.dll; pip does not install
+    them, and without them even a plain ``spark.read.parquet`` fails with an UnsatisfiedLinkError (NativeIO$Windows)."""
+    if sys.platform != "win32":
+        return False
+    home = os.environ.get("HADOOP_HOME") or os.environ.get("hadoop.home.dir")
+    return not (home and (Path(home) / "bin" / "winutils.exe").is_file())
+
+
 def get_spark(app: str = "nba-lake", memory: str | None = None, cores: int | None = None):
     """A local-mode SparkSession for reading the lake (PySpark is optional: pip install -r requirements-bigdata.txt).
 
@@ -308,6 +319,11 @@ def get_spark(app: str = "nba-lake", memory: str | None = None, cores: int | Non
     if not _java_available():
         raise RuntimeError("get_spark() needs Java 17 or 21: install it and put java on PATH, or point JAVA_HOME at a "
                            "JDK that has bin/java (JAVA_HOME is " + repr(os.environ.get("JAVA_HOME")) + ")")
+    if _windows_hadoop_missing():
+        warnings.warn("Spark on native Windows needs Hadoop's winutils.exe and hadoop.dll (set HADOOP_HOME to a folder "
+                      "whose bin\\ holds them); without them reading the lake fails with an UnsatisfiedLinkError. "
+                      "DuckDB (datalake.duck()) needs none of this, or run Spark under WSL2. See data/README.md.",
+                      stacklevel=2)
     asked = memory is not None or cores is not None
     memory = memory or os.environ.get("NBA_SPARK_MEMORY", "4g")
     cores = cores or int(os.environ.get("NBA_SPARK_CORES", "4"))

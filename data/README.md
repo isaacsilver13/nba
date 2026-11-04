@@ -65,3 +65,9 @@ DuckDB and PySpark are optional: `pip install -r requirements-bigdata.txt` (PySp
 or `JAVA_HOME`). PySpark currently warns that it does not fully support pandas 3; the checks here avoid `toPandas()`.
 Spark only reads the lake; all writes go through `datalake.write_table` (pyarrow), because Spark's local writes can
 need Hadoop binaries on Windows. `python tools/spark_lake_check.py` confirms Spark and DuckDB agree on per-season counts.
+
+**Spark on native Windows** also needs Hadoop's `winutils.exe` and `hadoop.dll` even to *read* local Parquet (pip does
+not install them; the symptom is `UnsatisfiedLinkError ... NativeIO$Windows.access0`, found by running the check on
+Windows with Java 17). Either set `HADOOP_HOME` to a folder whose `bin\` holds binaries matching PySpark's Hadoop
+version, or run Spark under WSL2. The lake is ~0.5 GB, so DuckDB covers it comfortably and Spark is not needed here;
+`get_spark()` warns when it detects the missing binaries.
