@@ -31,6 +31,7 @@ Big tables (play-by-play, box scores, odds, the games index; anything past ~1 GB
 
 - Engine ladder: pandas under ~1 GB (always pass `columns=`/`filters=` to `datalake.read_pandas`), then DuckDB (`datalake.duck()`) for large joins and aggregates, and PySpark only if the data outgrows one machine. Spark only reads (`datalake.get_spark()`/`spark_read()`); every lake write goes through `datalake.write_table` (pyarrow).
 - `game_id` is always a 10-character string (leading zeros); `season_year` is the text label (`2019-20`). `write_table` and the converter refuse numeric ids.
+- `write_table(mode="append")` refuses a different schema and `mode="overwrite"` is atomic (staging + swap). Tools only prefer the lake over a `data/csv` file once `datalake.verification_status(table)` says the table is verified.
 - Convert in chunks: the machine runs near its memory limit. `tools/sqlite_to_parquet.py` already does, and verifies row counts, null counts and column sums against the SQLite source.
 - DuckDB and PySpark are optional (`requirements-bigdata.txt`). Tests must pass without data, DuckDB, PySpark or Java: skip with `pytest.importorskip`, and keep real Spark runs opt-in (`RUN_SPARK=1`).
 - `experiment.py` (its `FROZEN` section and the paths it reads) and the small `data/processed` pipeline CSVs stay as they are; `data/cache/boxscores/` keeps its layout (no migration without an explicit decision).

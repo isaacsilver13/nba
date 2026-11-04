@@ -1,6 +1,7 @@
 """SQLite -> Parquet converter (tools/sqlite_to_parquet.py) on tiny synthetic databases: no real data, no DuckDB."""
 import hashlib
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -400,3 +401,21 @@ def test_converter_refuses_unplaceable_ids_and_names_the_table(tmp_path):
     with pytest.raises(s2p.ConversionError, match=r"play_by_play: cannot derive season_year: game id '0028500001'"):
         s2p.convert(db, "play_by_play", log=lambda *_: None)
     assert not datalake.table_path("play_by_play").exists()
+
+
+def test_a_converter_run_verifies_the_table_until_something_writes_to_it(tmp_path, capsys):
+    cli_sql_dir(tmp_path)
+    assert datalake.verification_status("game_odds")[0] is False  # no lake, no report
+    assert s2p.main(["--tables", "game_odds"]) == 0
+    assert datalake.verification_status("game_odds") == (True, "")
+    assert datalake.prefer_lake("game_odds", csv_exists=True) == (True, "")
+    assert s2p.main(["--tables", "game_odds", "--skip-verify", "--overwrite"]) == 0
+    ok, why = datalake.verification_status("game_odds")
+    assert not ok and "not verified" in why
+    assert s2p.main(["--tables", "game_odds", "--verify-only"]) == 0
+    report = datalake.converter_report_path()
+    t = report.stat().st_mtime - 100
+    os.utime(report, (t, t))  # as if the report had been written long ago
+    datalake.write_table("game_odds", datalake.read_pandas("game_odds"), mode="append")
+    ok, why = datalake.verification_status("game_odds")
+    assert not ok and "written to after it was verified" in why

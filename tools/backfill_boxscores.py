@@ -14,8 +14,9 @@ Idempotent: only games missing from all_boxscores.csv are added; a second run do
 
     python tools/backfill_boxscores.py [--dry-run] [--source auto|lake|csv]
 
---source auto (default) reads the lake's player_boxscores when it exists and the CSV otherwise, and says which.
-Run tools/compare_csv_to_lake.py first if you want proof that the two sources are the same data.
+--source auto (default) reads the lake's player_boxscores only once tools/sqlite_to_parquet.py has verified it (and it
+has not been written to since); otherwise it reads the CSV, and says which. --source lake / csv force one.
+Run tools/compare_csv_to_lake.py for proof that the two sources are the same data.
 """
 import argparse
 import os
@@ -51,10 +52,16 @@ SRC_COLUMNS = list(dict.fromkeys(["game_id", "player_id", "team_abbreviation", "
 
 
 def load_source(source, game_ids):
-    """Source player rows (``SRC_COLUMNS``; the lake path is already limited to ``game_ids``) and a label for the log."""
+    """Source player rows (``SRC_COLUMNS``; the lake path is already limited to ``game_ids``) and a label for the log.
+    ``auto`` uses the lake only when its table is verified (datalake.prefer_lake), otherwise the CSV."""
     if source not in ("auto", "lake", "csv"):
         raise ValueError(f"source must be auto, lake or csv, got {source!r}")
-    if source == "lake" or (source == "auto" and "player_boxscores" in datalake.tables()):
+    use_lake = source == "lake"
+    if source == "auto":
+        use_lake, message = datalake.prefer_lake("player_boxscores", csv_exists=SRC.is_file())
+        if message:
+            print(message)
+    if use_lake:
         df = datalake.read_pandas("player_boxscores", columns=SRC_COLUMNS,
                                   filters=[("game_id", "in", sorted(game_ids))])
         return df, "lake/player_boxscores"

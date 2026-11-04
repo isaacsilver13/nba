@@ -394,7 +394,7 @@ def main(argv=None) -> int:
 
     sql_dir = a.sql_dir or default_sql_dir()
     root = a.lake_root or datalake.lake_root()
-    path = a.report or root / "_reports" / "sqlite_to_parquet.json"
+    path = a.report or datalake.converter_report_path(root)
     prior = _load_report(path)  # keep other tables' results when only some tables are run
     report = {"sql_dir": str(sql_dir), "lake_root": str(root), "tables": dict(prior.get("tables", {}))}
     if "seasons" in prior:

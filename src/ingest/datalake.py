@@ -21,6 +21,7 @@ nothing here imports PySpark: install them only where you want them (see require
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -186,6 +187,50 @@ def read_pandas(table: str, columns=None, filters=None, root: Path | str | None 
     """
     expr = pq.filters_to_expression(filters) if filters else None
     return dataset(table, root).to_table(columns=list(columns) if columns else None, filter=expr).to_pandas()
+
+
+CONVERTER_REPORT = Path("_reports") / "sqlite_to_parquet.json"
+
+
+def converter_report_path(root: Path | str | None = None) -> Path:
+    return Path(root if root is not None else lake_root()) / CONVERTER_REPORT
+
+
+def verification_status(table: str, root: Path | str | None = None) -> tuple[bool, str]:
+    """(verified, reason). A table is verified when the last tools/sqlite_to_parquet.py run recorded a passing
+    verification for it with no error, and no file in the table is newer than that report (so nothing was written
+    to the table since)."""
+    report_path = converter_report_path(root)
+    try:
+        entry = json.loads(report_path.read_text()).get("tables", {}).get(table)
+    except (OSError, ValueError):
+        return False, "no converter report; run tools/sqlite_to_parquet.py"
+    if entry is None:
+        return False, "the converter report has no entry for it"
+    if "error" in entry:
+        return False, "its last conversion failed"
+    if "verify" not in entry:
+        return False, "it was converted but not verified"
+    if not entry["verify"].get("ok"):
+        return False, "its verification failed"
+    newest = max((f.stat().st_mtime for f in table_path(table, root).rglob("*.parquet")), default=0.0)
+    if newest > report_path.stat().st_mtime:
+        return False, "it was written to after it was verified"
+    return True, ""
+
+
+def prefer_lake(table: str, csv_exists: bool, root: Path | str | None = None) -> tuple[bool, str]:
+    """Shared policy for tools that used to read a data/csv file: use the lake table only if it exists and is verified.
+    Returns (use_lake, message to print). With no CSV to fall back to, an unverified lake is used with a warning."""
+    if table not in tables(root):
+        return False, ""
+    ok, why = verification_status(table, root)
+    if ok:
+        return True, ""
+    if not csv_exists:
+        return True, f"warning: lake table {table!r} is not verified ({why}) and there is no CSV fallback; using the lake"
+    return False, (f"note: not using lake table {table!r} ({why}); reading the CSV. "
+                   "Run tools/sqlite_to_parquet.py to verify the lake")
 
 
 def column_kind(arrow_type: pa.DataType) -> str:

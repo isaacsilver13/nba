@@ -44,6 +44,13 @@ The converter opens the SQLite files read-only, writes to a hidden staging folde
 after every chunk is written (an existing table needs `--overwrite`). `verify` compares row counts, null counts,
 numeric sums and text-length sums with the source. Nothing here deletes `data/sql`, `data/csv` or any backup.
 
+Each run records its results in `lake/_reports/sqlite_to_parquet.json` (merged per table across runs). A table counts
+as *verified* only if its last verification passed and nothing has been written to it since. Tools that used to read a
+`data/csv` file (`tools/backfill_boxscores.py`, `tools/encompass_check.py`) read the lake only once the table is
+verified and say which source they used; otherwise they keep reading the CSV (`--source lake|csv` forces one).
+Lake writes are safe by construction: `write_table` overwrites via a staging folder (a failure keeps the old table)
+and refuses to append data whose columns or types differ from the table's.
+
 ### Which engine
 
 | Data size | Use |

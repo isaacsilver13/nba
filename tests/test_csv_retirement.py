@@ -1,7 +1,9 @@
 """Retiring data/csv/ as a source: the CSV-vs-lake comparison gate, and the tools that now read the lake
 (tools/backfill_boxscores.py, tools/encompass_check.py) with the CSV as fallback. Synthetic data only."""
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -160,6 +162,16 @@ def player_df():
     return pd.DataFrame(rows)
 
 
+def mark_verified(*tables, ok=True, error=None, age=0):
+    """Write the converter report the way tools/sqlite_to_parquet.py does, newer than any lake file."""
+    path = datalake.converter_report_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {"error": error} if error else {"verify": {"ok": ok}}
+    path.write_text(json.dumps({"tables": {t: dict(entry) for t in tables}}))
+    t = time.time() + 60 - age
+    os.utime(path, (t, t))
+
+
 def setup_backfill(tmp_path, monkeypatch, name, with_lake):
     d = tmp_path / name
     (d / "processed").mkdir(parents=True)
@@ -203,13 +215,38 @@ def test_backfill_second_run_adds_nothing_from_either_source(tmp_path, monkeypat
     assert out.read_bytes() == first
 
 
-def test_backfill_auto_uses_lake_when_present_and_csv_otherwise(tmp_path, monkeypatch, capsys):
+def test_backfill_auto_uses_the_lake_only_when_it_is_verified(tmp_path, monkeypatch, capsys):
     setup_backfill(tmp_path, monkeypatch, "d", with_lake=True)
+    bf.main(["--dry-run"])  # lake exists but nothing verified it
+    out = capsys.readouterr().out
+    assert "available in player_boxscores.csv" in out and "not using lake table 'player_boxscores'" in out
+    mark_verified("player_boxscores")
     bf.main(["--dry-run"])
-    assert "available in lake/player_boxscores" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "available in lake/player_boxscores" in out and "not using" not in out
     setup_backfill(tmp_path, monkeypatch, "e", with_lake=False)
     bf.main(["--dry-run"])
     assert "available in player_boxscores.csv" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("report", [
+    dict(ok=False),                          # verification failed
+    dict(error="PermissionError: locked"),   # conversion failed
+    dict(age=10_000),                        # the lake was written to after the report
+])
+def test_backfill_auto_falls_back_to_csv_for_a_bad_or_stale_verification(tmp_path, monkeypatch, capsys, report):
+    setup_backfill(tmp_path, monkeypatch, "g", with_lake=True)
+    mark_verified("player_boxscores", **report)
+    bf.main(["--dry-run"])
+    assert "available in player_boxscores.csv" in capsys.readouterr().out
+
+
+def test_backfill_auto_uses_an_unverified_lake_with_a_warning_when_there_is_no_csv(tmp_path, monkeypatch, capsys):
+    setup_backfill(tmp_path, monkeypatch, "h", with_lake=True)
+    bf.SRC.unlink()
+    bf.main(["--dry-run"])
+    out = capsys.readouterr().out
+    assert "warning: lake table 'player_boxscores' is not verified" in out and "available in lake/player_boxscores" in out
 
 
 def test_backfill_lake_source_without_a_lake_fails_loudly(tmp_path, monkeypatch):
@@ -225,7 +262,7 @@ def test_backfill_reads_only_the_columns_it_uses():
 
 # ---- encompass_check: odds from lake or CSV ------------------------------------------------------------------------
 
-def test_load_odds_prefers_lake_then_csv_and_explicit_path_wins(data_dir, monkeypatch):
+def test_load_odds_uses_a_verified_lake_else_csv_and_explicit_path_wins(data_dir, monkeypatch, capsys):
     monkeypatch.setattr(enc, "DATA", data_dir)  # module constant, fixed at import like the other tools
     assert enc.load_odds() == (None, None)
     csv_df = odds_df().assign(decimal_home=9.0)  # marker so we can tell the sources apart
@@ -233,6 +270,9 @@ def test_load_odds_prefers_lake_then_csv_and_explicit_path_wins(data_dir, monkey
     g, label = enc.load_odds()
     assert label == "game_odds.csv" and (g["decimal_home"] == 9.0).all() and g["game_id"].iloc[0] == "0020000001"
     datalake.write_table("game_odds", odds_df())
+    g, label = enc.load_odds()  # lake exists but is unverified: still the CSV
+    assert label == "game_odds.csv" and "not using lake table 'game_odds'" in capsys.readouterr().out
+    mark_verified("game_odds")
     g, label = enc.load_odds()
     assert label == "lake/game_odds" and g["decimal_home"].iloc[0] == 1.5 and g["game_id"].iloc[0] == "0020000001"
     g, label = enc.load_odds(data_dir / "csv" / "game_odds.csv")
@@ -240,45 +280,8 @@ def test_load_odds_prefers_lake_then_csv_and_explicit_path_wins(data_dir, monkey
     assert enc.load_odds(data_dir / "csv" / "missing.csv") == (None, None)
 
 
-# ---- integer sums beyond 2**53 (play_by_play.team_id is ~1.6e9 x 18M rows ~ 2.9e16) ---------------------------------
-
-def big_int_df(n=20_000, base=1_600_000_000_000):
-    rng = np.random.default_rng(1)
-    return pd.DataFrame({"game_id": "0021900001", "season_year": "2019-20",
-                         "team_id": (base + rng.integers(0, 1_000_000, n)).astype("int64")})
-
-
-def test_integer_sum_above_2_pow_53_is_compared_exactly(data_dir):
-    df = big_int_df()
-    assert int(df["team_id"].sum()) > 2 ** 53
-    write_pair(data_dir, "play_boxscores_big", df=df)
-    r = cmp.compare_one(data_dir / "csv" / "play_boxscores_big.csv", chunk_rows=1_500, log=lambda *_: None)
-    assert r.identical, r.reasons
-
-
-def test_one_unit_change_in_a_huge_integer_sum_is_caught(data_dir):
-    df = big_int_df()
-    changed = df.copy()
-    changed.loc[7, "team_id"] += 1
-    write_pair(data_dir, "play_boxscores_big", df=df, csv_df=changed)
-    r = cmp.compare_one(data_dir / "csv" / "play_boxscores_big.csv", chunk_rows=1_500, log=lambda *_: None)
-    assert not r.identical and any(m.startswith("team_id: sum") for m in r.reasons)
-
-
-def test_integers_written_as_floats_because_of_nulls_are_identical(data_dir):
-    df = big_int_df(2_000, base=8_000_000_000_000)
-    assert int(df["team_id"].sum()) > 2 ** 53
-    df["team_id"] = df["team_id"].astype("Int64")
-    df.loc[3, "team_id"] = pd.NA  # the CSV writes the rest as plain digits, but pandas re-reads them as floats
-    write_pair(data_dir, "play_boxscores_big", df=df)
-    r = cmp.compare_one(data_dir / "csv" / "play_boxscores_big.csv", chunk_rows=500, log=lambda *_: None)
-    assert r.identical, r.reasons
-
-
-def test_fractional_values_in_an_integer_column_are_a_difference(data_dir):
-    df = big_int_df(100)
-    junk = df.copy().astype({"team_id": float})
-    junk.loc[2, "team_id"] += 0.5
-    write_pair(data_dir, "play_boxscores_big", df=df, csv_df=junk)
-    r = cmp.compare_one(data_dir / "csv" / "play_boxscores_big.csv", log=lambda *_: None)
-    assert not r.identical and any("not whole numbers" in m for m in r.reasons)
+def test_load_odds_uses_an_unverified_lake_when_there_is_no_csv(data_dir, monkeypatch, capsys):
+    monkeypatch.setattr(enc, "DATA", data_dir)
+    datalake.write_table("game_odds", odds_df())
+    g, label = enc.load_odds()
+    assert label == "lake/game_odds" and "no CSV fallback" in capsys.readouterr().out

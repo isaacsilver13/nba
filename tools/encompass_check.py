@@ -103,15 +103,18 @@ def fit_logistic(x, y, xt):
 
 
 def load_odds(path=None):
-    """(game_odds frame, label). An explicit CSV path wins; otherwise the lake's game_odds table, then
-    csv/game_odds.csv. (None, None) when there is no source."""
+    """(game_odds frame, label). An explicit CSV path wins; otherwise the lake's game_odds table once it is verified
+    (datalake.prefer_lake), else csv/game_odds.csv. (None, None) when there is no source."""
     if path:
         p = Path(path)
         return (pd.read_csv(p, dtype={"game_id": str}), p.name) if p.exists() else (None, None)
-    if "game_odds" in datalake.tables():
+    csv = DATA / "csv" / "game_odds.csv"
+    use_lake, message = datalake.prefer_lake("game_odds", csv_exists=csv.is_file())
+    if message:
+        print(message)
+    if use_lake:
         return datalake.read_pandas("game_odds"), "lake/game_odds"
-    p = DATA / "csv" / "game_odds.csv"
-    return (pd.read_csv(p, dtype={"game_id": str}), p.name) if p.exists() else (None, None)
+    return (pd.read_csv(csv, dtype={"game_id": str}), csv.name) if csv.is_file() else (None, None)
 
 
 def moneyline_report(d, odds):

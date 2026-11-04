@@ -309,3 +309,44 @@ def test_get_spark_warns_when_an_active_session_ignores_the_request(tmp_path, mo
         assert datalake.get_spark() is active
         assert datalake.get_spark(memory="1g", cores=8) is active
     assert built == []  # never builds a second session
+
+
+# ---- verification gate ---------------------------------------------------------------------------------------------
+
+def _report(tables, age=0):
+    import json
+    import os
+    import time
+    path = datalake.converter_report_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"tables": tables}))
+    t = time.time() + 60 - age
+    os.utime(path, (t, t))
+
+
+def test_verification_status_reasons():
+    datalake.write_table("game_odds", pd.DataFrame({"game_id": ["0021900001"], "v": [1]}))
+    assert datalake.verification_status("game_odds") == (False, "no converter report; run tools/sqlite_to_parquet.py")
+    _report({})
+    assert "no entry" in datalake.verification_status("game_odds")[1]
+    _report({"game_odds": {"convert": {}}})
+    assert "not verified" in datalake.verification_status("game_odds")[1]
+    _report({"game_odds": {"verify": {"ok": False}}})
+    assert "verification failed" in datalake.verification_status("game_odds")[1]
+    _report({"game_odds": {"error": "boom", "verify": {"ok": True}}})
+    assert "conversion failed" in datalake.verification_status("game_odds")[1]
+    _report({"game_odds": {"verify": {"ok": True}}})
+    assert datalake.verification_status("game_odds") == (True, "")
+    _report({"game_odds": {"verify": {"ok": True}}}, age=10_000)
+    assert "written to after" in datalake.verification_status("game_odds")[1]
+
+
+def test_prefer_lake_policy():
+    assert datalake.prefer_lake("game_odds", csv_exists=True) == (False, "")  # no lake table at all
+    datalake.write_table("game_odds", pd.DataFrame({"game_id": ["0021900001"], "v": [1]}))
+    use, msg = datalake.prefer_lake("game_odds", csv_exists=True)
+    assert use is False and "reading the CSV" in msg
+    use, msg = datalake.prefer_lake("game_odds", csv_exists=False)
+    assert use is True and "no CSV fallback" in msg
+    _report({"game_odds": {"verify": {"ok": True}}})
+    assert datalake.prefer_lake("game_odds", csv_exists=True) == (True, "")
