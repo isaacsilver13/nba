@@ -3,17 +3,25 @@
     python tools/line_shop_clv.py                 # reads $NBA_DATA_DIR/raw/odds/sgo/**/*.parquet (git pull the data repo first)
     python tools/line_shop_clv.py --selftest
 
-Per game (full-game moneyline, SGO `ml`): every book's OPEN and CLOSE American odds, de-vigged per book (multiplicative).
-  fair_open_loo(b)  = median over the OTHER books' de-vigged open prob   (leave-one-out so a book never votes on itself)
+Per game (full-game moneyline: period_id "game", bet_type_id "ml", stat_id "points"; FanDuel's firstToScore rows are also
+typed "ml" and are excluded): every book's ENTRY and CLOSE American odds, de-vigged per book (multiplicative). In the code
+and the output the entry price is still called "open" (open_h, p_open, loo_open), so read "open" below as "entry".
+  entry="snapshot" (default): each book's price in the same ~10am capture (slot open/props), so all books are priced at one
+      moment and a bet could actually have been placed. Close = SGO's closeOdds from the settle capture.
+  entry="opening" (--entry opening): each book's own openOdds. Books post these at different times, so comparing one
+      book's open with the others' opens looks ahead (posting-time look-ahead); kept only to show that artifact.
+  fair_open_loo(b)  = median over the OTHER books' de-vigged entry prob   (leave-one-out so a book never votes on itself)
   fair_close_loo(b) = median over the OTHER books' de-vigged close prob
-Strategies priced at a book's OPEN, selected using only open-time information, scored by CLV against the others' close:
-  soft-book : bet side s at book b when dec_b(s) * fair_open_loo(b)[s] - 1 > THR   (is any book's open stale vs the rest?)
-  shop      : bet the best open decimal across books for the side with the biggest edge vs the leave-one-out consensus
-  baseline  : bet the median-book price on every game's both sides (= minus the vig; the number everything must beat)
-CLV = fair_close_loo[s] * dec_open - 1, i.e. the expected return IF the others' close is efficient; it already pays the vig.
+Strategies priced at a book's entry, selected using only entry-time information, scored by CLV against the others' close:
+  soft-book : bet side s at book b when dec_b(s) * fair_open_loo(b)[s] - 1 > THR   (is any book's price stale vs the rest?)
+  shop      : bet the best entry decimal across books for the side with the biggest edge vs the leave-one-out consensus
+  baseline  : every side at every book (= minus the vig; the number everything must beat)
+CLV = fair_close_loo[s] * dec_entry - 1, i.e. the expected return IF the others' close is efficient; it already pays the vig.
+A data-integrity filter drops books whose close sits persistently far from the others' (MAX_BOOK_DEV): that is mis-mapped
+data, not a soft book.
 
-Caveats printed with every run: SGO `open_odds` is the book's opening price (limits are tiny and it may be gone within
-minutes), so a positive CLV here is an upper bound on what is bettable; n is small early in a season (SE is printed).
+Caveats printed with every run: limits at these prices may be tiny and a price may be gone within minutes, so a positive
+CLV here is an upper bound on what is bettable; n is small early in a season (SE is printed; < 300 games is descriptive only).
 """
 import argparse
 import glob
