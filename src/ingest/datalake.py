@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import uuid
 from pathlib import Path
 
@@ -149,3 +150,38 @@ def duck(root: Path | str | None = None):
         hive = ", hive_partitioning = true, hive_types = {'season_year': VARCHAR}" if name in PARTITIONED else ""
         con.execute(f"CREATE VIEW \"{name}\" AS SELECT * FROM read_parquet('{glob}'{hive})")
     return con
+
+
+def get_spark(app: str = "nba-lake", memory: str | None = None, cores: int | None = None):
+    """A local-mode SparkSession for reading the lake (PySpark is optional: pip install -r requirements-bigdata.txt).
+
+    Needs Java 17 or 21 on PATH or in JAVA_HOME. Memory and cores default to ``$NBA_SPARK_MEMORY`` (``4g``) and
+    ``$NBA_SPARK_CORES`` (4) so a laptop is not starved. READ ONLY by convention: all lake writes go through
+    ``write_table`` (pyarrow), because Spark's local writes can need Hadoop binaries on Windows.
+    """
+    try:
+        from pyspark.sql import SparkSession
+    except ImportError as exc:  # pragma: no cover - message only
+        raise ImportError("get_spark() needs PySpark: pip install -r requirements-bigdata.txt") from exc
+    if not (shutil.which("java") or os.environ.get("JAVA_HOME")):
+        raise RuntimeError("get_spark() needs Java 17 or 21: install it and put java on PATH (or set JAVA_HOME)")
+    # workers must use the same interpreter as the driver, or a venv/Windows install picks a different Python
+    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
+    memory = memory or os.environ.get("NBA_SPARK_MEMORY", "4g")
+    cores = cores or int(os.environ.get("NBA_SPARK_CORES", "4"))
+    return (SparkSession.builder.master(f"local[{cores}]").appName(app)
+            .config("spark.driver.memory", memory)
+            .config("spark.ui.enabled", "false")
+            .config("spark.sql.shuffle.partitions", str(max(2, cores * 2)))
+            .config("spark.sql.session.timeZone", "UTC")
+            # keep partition values as text ("2019-20"), never let Spark guess a number
+            .config("spark.sql.sources.partitionColumnTypeInference.enabled", "false")
+            .getOrCreate())
+
+
+def spark_read(spark, table: str, root: Path | str | None = None):
+    """The lake table as a Spark DataFrame (``season_year`` is a string column for partitioned tables)."""
+    path = table_path(table, root)
+    dataset(table, root)  # same friendly FileNotFoundError as the other readers
+    return spark.read.option("basePath", path.as_uri()).parquet(path.as_uri())

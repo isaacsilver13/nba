@@ -1,0 +1,9 @@
+# Optional extras for large-table work on the Parquet lake (src/ingest/datalake.py). NOT needed by CI or the pipeline:
+# the lake itself only needs pandas + pyarrow from requirements.txt.
+#
+#   pip install -r requirements-bigdata.txt
+#
+# DuckDB: SQL over the lake (datalake.duck()). First choice for joins/aggregates that outgrow pandas.
+# PySpark: local-mode reads (datalake.get_spark()); only worth it if data outgrows one machine. Needs Java 17 or 21.
+duckdb>=2.0,<3
+pyspark>=4.0,<5
