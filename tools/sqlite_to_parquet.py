@@ -162,22 +162,6 @@ def _dir_bytes(path: Path) -> int:
     return sum(f.stat().st_size for f in Path(path).rglob("*") if f.is_file())
 
 
-def _swap(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    old = None
-    if dst.exists():
-        old = dst.with_name(f".old-{dst.name}-{uuid.uuid4().hex[:8]}")
-        dst.rename(old)
-    try:
-        src.rename(dst)
-    except Exception:
-        if old is not None:
-            old.rename(dst)
-        raise
-    if old is not None:
-        shutil.rmtree(old, ignore_errors=True)
-
-
 @dataclass
 class ConvertResult:
     table: str
@@ -218,7 +202,7 @@ def convert(sqlite_path, table: str, root=None, chunk_rows: int = 500_000, max_c
                 log(f"  {table}: {written:,}/{total:,} rows")
             if written != total:
                 raise ConversionError(f"{table}: read {written} rows but count(*) said {total}")
-            _swap(staging / table, final)
+            datalake.replace_dir(staging / table, final)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
     finally:

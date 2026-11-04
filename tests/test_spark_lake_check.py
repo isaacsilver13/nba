@@ -58,6 +58,8 @@ def test_spark_and_duckdb_agree_on_a_synthetic_lake(tmp_path, monkeypatch):
         assert dict(sdf.dtypes)["season_year"] == "string"
         assert dict(sdf.dtypes)["game_id"] == "string"
         assert sdf.where("game_id = '0029600001'").count() == 4  # leading zeros survive through Spark
+        monkeypatch.chdir(tmp_path)  # a relative lake root must work for Spark too
+        assert datalake.spark_read(spark, "play_by_play", root=Path("lake")).count() == 24
         res = slc.check_table("play_by_play", datalake.duck(), spark)
     finally:
         spark.stop()

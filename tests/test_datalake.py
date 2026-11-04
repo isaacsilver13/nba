@@ -1,6 +1,12 @@
 """Parquet lake layout (src/ingest/datalake.py) on tiny synthetic frames: no network, no real data, no DuckDB needed
 (the DuckDB parity test skips itself when duckdb is not installed)."""
+import sys
+import types
+import warnings
+from pathlib import Path
+
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from src.ingest import datalake
@@ -129,3 +135,177 @@ def test_duckdb_count_parity():
     assert per_season == {"1996-97": 3, "2019-20": 3, "2025-26": 3}
     # leading zeros survive through DuckDB too
     assert "0029600001" in {r[0] for r in con.execute("SELECT game_id FROM play_by_play").fetchall()}
+
+
+# ---- append refuses a different schema -----------------------------------------------------------------------------
+
+def test_append_rejects_new_missing_and_retyped_columns():
+    datalake.write_table("play_by_play", pbp())
+    with pytest.raises(ValueError, match=r"new columns \['extra'\]"):
+        datalake.write_table("play_by_play", pbp().assign(extra=1), mode="append")
+    with pytest.raises(ValueError, match=r"missing columns \['description'\]"):
+        datalake.write_table("play_by_play", pbp().drop(columns="description"), mode="append")
+    with pytest.raises(ValueError, match="action_number: table has int64, data has double"):
+        datalake.write_table("play_by_play", pbp().assign(action_number=1.5), mode="append")
+    assert len(datalake.read_pandas("play_by_play")) == 9  # nothing was appended
+
+
+def test_append_accepts_reordered_columns_and_either_string_flavour():
+    schema = pa.schema([("game_id", pa.string()), ("season_year", pa.string()), ("action_number", pa.int64()),
+                        ("description", pa.string()), ("score_home", pa.float64())])
+    datalake.write_table("play_by_play", pa.Table.from_pandas(pbp(), schema=schema, preserve_index=False))
+    datalake.write_table("play_by_play", pbp()[list(reversed(pbp().columns))], mode="append")  # pandas str, new order
+    assert len(datalake.read_pandas("play_by_play")) == 18
+
+
+def test_first_append_to_a_new_table_is_fine():
+    datalake.write_table("play_by_play", pbp(), mode="append")
+    assert len(datalake.read_pandas("play_by_play")) == 9
+
+
+# ---- overwrite is atomic -------------------------------------------------------------------------------------------
+
+def test_failed_overwrite_keeps_the_old_table_and_leaves_no_staging(monkeypatch):
+    datalake.write_table("play_by_play", pbp(2))
+    real = datalake.ds.write_dataset
+
+    def write_then_die(*a, **k):
+        real(*a, **k)  # the new files are on disk when the "crash" happens
+        raise OSError("disk full")
+    with monkeypatch.context() as m:
+        m.setattr(datalake.ds, "write_dataset", write_then_die)
+        with pytest.raises(OSError, match="disk full"):
+            datalake.write_table("play_by_play", pbp(1))
+    assert len(datalake.read_pandas("play_by_play")) == 6
+    assert not [p for p in datalake.lake_root().iterdir() if p.name.startswith(".")]
+
+
+def test_overwrite_replaces_and_leaves_nothing_behind():
+    datalake.write_table("play_by_play", pbp(2))
+    datalake.write_table("play_by_play", pbp(1))
+    assert len(datalake.read_pandas("play_by_play")) == 3
+    assert [p.name for p in datalake.lake_root().iterdir()] == ["play_by_play"]
+
+
+def test_replace_dir_restores_the_old_directory_if_the_move_fails(tmp_path):
+    dst = tmp_path / "t"
+    dst.mkdir()
+    (dst / "keep.txt").write_text("x")
+    with pytest.raises(FileNotFoundError):
+        datalake.replace_dir(tmp_path / "missing_src", dst)
+    assert (dst / "keep.txt").read_text() == "x" and [p.name for p in tmp_path.iterdir()] == ["t"]
+
+
+# ---- Spark helpers (no JVM: a fake pyspark stands in) --------------------------------------------------------------
+
+class _Reader:
+    def __init__(self):
+        self.calls = []
+
+    def option(self, k, v):
+        self.calls.append((k, v))
+        return self
+
+    def parquet(self, path):
+        self.calls.append(("parquet", path))
+        return "DF"
+
+
+def test_spark_read_and_table_uri_accept_a_relative_root(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    datalake.write_table("game_odds", pd.DataFrame({"game_id": ["0021900001"]}), root=Path("rel_lake"))
+    uri = datalake.table_uri("game_odds", Path("rel_lake"))
+    assert uri == (tmp_path / "rel_lake" / "game_odds").as_uri() and uri.startswith("file:///")
+    spark = types.SimpleNamespace(read=_Reader())
+    assert datalake.spark_read(spark, "game_odds", root=Path("rel_lake")) == "DF"
+    assert spark.read.calls == [("basePath", uri), ("parquet", uri)]
+
+
+def _fake_pyspark(monkeypatch, active=None):
+    built = []
+
+    class Conf:
+        def __init__(self, d):
+            self.d = d
+
+        def get(self, k, default=None):
+            return self.d.get(k, default)
+
+    class Session:
+        def __init__(self, master, conf):
+            self.sparkContext = types.SimpleNamespace(master=master, getConf=lambda: Conf(conf))
+
+    class Builder:
+        def __init__(self):
+            self.conf, self.m = {}, None
+
+        def master(self, m):
+            self.m = m
+            return self
+
+        def appName(self, _):
+            return self
+
+        def config(self, k, v):
+            self.conf[k] = v
+            return self
+
+        def getOrCreate(self):
+            built.append((self.m, dict(self.conf)))
+            return Session(self.m, self.conf)
+
+    class SparkSession:
+        builder = Builder()
+
+        @staticmethod
+        def getActiveSession():
+            return active
+
+    sql = types.ModuleType("pyspark.sql")
+    sql.SparkSession = SparkSession
+    pkg = types.ModuleType("pyspark")
+    pkg.sql = sql
+    monkeypatch.setitem(sys.modules, "pyspark", pkg)
+    monkeypatch.setitem(sys.modules, "pyspark.sql", sql)
+    return built, Session
+
+
+def _java_home(tmp_path, monkeypatch):
+    home = tmp_path / "jdk"
+    (home / "bin").mkdir(parents=True)
+    (home / "bin" / "java").write_text("")
+    monkeypatch.setenv("JAVA_HOME", str(home))
+
+
+def test_get_spark_rejects_a_stale_java_home_even_if_java_is_on_path(tmp_path, monkeypatch):
+    _fake_pyspark(monkeypatch)
+    monkeypatch.setenv("JAVA_HOME", str(tmp_path / "removed-jdk"))
+    monkeypatch.setattr(datalake.shutil, "which", lambda _: "/usr/bin/java")
+    with pytest.raises(RuntimeError, match="removed-jdk"):
+        datalake.get_spark()
+
+
+def test_get_spark_builds_local_mode_with_requested_or_env_defaults(tmp_path, monkeypatch):
+    built, _ = _fake_pyspark(monkeypatch)
+    _java_home(tmp_path, monkeypatch)
+    datalake.get_spark(memory="2g", cores=2)
+    assert built[-1][0] == "local[2]" and built[-1][1]["spark.driver.memory"] == "2g"
+    assert built[-1][1]["spark.sql.sources.partitionColumnTypeInference.enabled"] == "false"
+    monkeypatch.setenv("NBA_SPARK_MEMORY", "3g")
+    monkeypatch.setenv("NBA_SPARK_CORES", "3")
+    datalake.get_spark()
+    assert built[-1][0] == "local[3]" and built[-1][1]["spark.driver.memory"] == "3g"
+
+
+def test_get_spark_warns_when_an_active_session_ignores_the_request(tmp_path, monkeypatch):
+    _java_home(tmp_path, monkeypatch)
+    _, Session = _fake_pyspark(monkeypatch)
+    active = Session("local[8]", {"spark.driver.memory": "1g"})
+    built, _ = _fake_pyspark(monkeypatch, active=active)
+    with pytest.warns(UserWarning, match="NOT applied"):
+        assert datalake.get_spark(memory="2g", cores=2) is active
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no request, or the same request, means no warning
+        assert datalake.get_spark() is active
+        assert datalake.get_spark(memory="1g", cores=8) is active
+    assert built == []  # never builds a second session

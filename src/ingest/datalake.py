@@ -25,6 +25,7 @@ import os
 import shutil
 import sys
 import uuid
+import warnings
 from pathlib import Path
 
 import pandas as pd
@@ -85,12 +86,66 @@ def _check_schema(table: str, tbl: pa.Table) -> None:
             raise ValueError(f"{table}: {PARTITION_COL} has nulls; every row needs a season to be partitioned")
 
 
+def _norm_type(t: pa.DataType) -> pa.DataType:
+    return pa.string() if pa.types.is_large_string(t) else t
+
+
+def _check_append(table: str, tbl: pa.Table, root) -> None:
+    """Refuse an append whose columns or types differ from what the table already holds. Without this the dataset's
+    schema comes from its first file, so a new column would be silently invisible on read."""
+    path = table_path(table, root)
+    if not path.is_dir() or not any(path.rglob("*.parquet")):
+        return
+    have = {f.name: _norm_type(f.type) for f in dataset(table, root).schema}
+    new = {f.name: _norm_type(f.type) for f in tbl.schema}
+    problems = []
+    if set(have) - set(new):
+        problems.append(f"missing columns {sorted(set(have) - set(new))}")
+    if set(new) - set(have):
+        problems.append(f"new columns {sorted(set(new) - set(have))}")
+    problems += [f"{n}: table has {have[n]}, data has {new[n]}" for n in have if n in new and have[n] != new[n]]
+    if problems:
+        raise ValueError(f"cannot append to lake table {table!r}: " + "; ".join(problems)
+                         + ". Use mode='overwrite' to replace the table with the new schema.")
+
+
+def replace_dir(src: Path, dst: Path) -> None:
+    """Move directory ``src`` to ``dst``, replacing ``dst`` only once ``src`` is complete (the old one is renamed aside
+    first and restored if the move fails, so there is never a moment without a good copy)."""
+    src, dst = Path(src), Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    old = None
+    if dst.exists():
+        old = dst.with_name(f".old-{dst.name}-{uuid.uuid4().hex[:8]}")
+        dst.rename(old)
+    try:
+        src.rename(dst)
+    except Exception:
+        if old is not None:
+            old.rename(dst)
+        raise
+    if old is not None:
+        shutil.rmtree(old, ignore_errors=True)
+
+
+def _write_files(table: str, tbl: pa.Table, out: Path) -> None:
+    out.mkdir(parents=True, exist_ok=True)
+    ds.write_dataset(
+        tbl, out, format="parquet",
+        partitioning=_HIVE if table in PARTITIONED else None,
+        file_options=ds.ParquetFileFormat().make_write_options(compression=COMPRESSION),
+        basename_template=f"part-{uuid.uuid4().hex}-{{i}}.parquet",
+        existing_data_behavior="overwrite_or_ignore",
+    )
+
+
 def write_table(table: str, data, *, mode: str = "overwrite", root: Path | str | None = None) -> Path:
     """Write ``data`` (DataFrame or Arrow table) as lake table ``table``.
 
     ``mode="overwrite"`` replaces whatever the lake already holds for this table (only that table's directory is
-    touched). ``mode="append"`` adds files, which is how a large table is converted chunk by chunk.
-    Returns the table directory.
+    touched): the new table is written to a hidden staging directory and swapped in, so a failure part-way leaves the
+    old table intact. ``mode="append"`` adds files (how a large table is converted chunk by chunk) and refuses data
+    whose columns or types differ from the table's. Returns the table directory.
     """
     if mode not in {"overwrite", "append"}:
         raise ValueError(f"mode must be 'overwrite' or 'append', got {mode!r}")
@@ -102,17 +157,16 @@ def write_table(table: str, data, *, mode: str = "overwrite", root: Path | str |
     _check_schema(table, tbl)
 
     out = table_path(table, root)
-    if mode == "overwrite" and out.exists():
-        shutil.rmtree(out)
-    out.mkdir(parents=True, exist_ok=True)
-
-    ds.write_dataset(
-        tbl, out, format="parquet",
-        partitioning=_HIVE if table in PARTITIONED else None,
-        file_options=ds.ParquetFileFormat().make_write_options(compression=COMPRESSION),
-        basename_template=f"part-{uuid.uuid4().hex}-{{i}}.parquet",
-        existing_data_behavior="overwrite_or_ignore",
-    )
+    if mode == "append":
+        _check_append(table, tbl, root)
+        _write_files(table, tbl, out)
+        return out
+    staging = out.parent / f".staging-{table}-{uuid.uuid4().hex[:8]}"
+    try:
+        _write_files(table, tbl, staging / table)
+        replace_dir(staging / table, out)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     return out
 
 
@@ -187,24 +241,43 @@ def duck(root: Path | str | None = None):
     return con
 
 
+def _java_available() -> bool:
+    home = os.environ.get("JAVA_HOME")
+    if home:  # Spark's launcher uses JAVA_HOME first, so a stale value breaks it even if java is on PATH
+        return any((Path(home) / "bin" / name).is_file() for name in ("java", "java.exe"))
+    return shutil.which("java") is not None
+
+
 def get_spark(app: str = "nba-lake", memory: str | None = None, cores: int | None = None):
     """A local-mode SparkSession for reading the lake (PySpark is optional: pip install -r requirements-bigdata.txt).
 
     Needs Java 17 or 21 on PATH or in JAVA_HOME. Memory and cores default to ``$NBA_SPARK_MEMORY`` (``4g``) and
-    ``$NBA_SPARK_CORES`` (4) so a laptop is not starved. READ ONLY by convention: all lake writes go through
-    ``write_table`` (pyarrow), because Spark's local writes can need Hadoop binaries on Windows.
+    ``$NBA_SPARK_CORES`` (4) so a laptop is not starved. If a session is already running it is returned as is (Spark
+    cannot resize it), with a warning when you asked for different memory or cores. READ ONLY by convention: all lake
+    writes go through ``write_table`` (pyarrow), because Spark's local writes can need Hadoop binaries on Windows.
     """
     try:
         from pyspark.sql import SparkSession
     except ImportError as exc:  # pragma: no cover - message only
         raise ImportError("get_spark() needs PySpark: pip install -r requirements-bigdata.txt") from exc
-    if not (shutil.which("java") or os.environ.get("JAVA_HOME")):
-        raise RuntimeError("get_spark() needs Java 17 or 21: install it and put java on PATH (or set JAVA_HOME)")
+    if not _java_available():
+        raise RuntimeError("get_spark() needs Java 17 or 21: install it and put java on PATH, or point JAVA_HOME at a "
+                           "JDK that has bin/java (JAVA_HOME is " + repr(os.environ.get("JAVA_HOME")) + ")")
+    asked = memory is not None or cores is not None
+    memory = memory or os.environ.get("NBA_SPARK_MEMORY", "4g")
+    cores = cores or int(os.environ.get("NBA_SPARK_CORES", "4"))
+    active = SparkSession.getActiveSession()
+    if active is not None:
+        conf = active.sparkContext.getConf()
+        if asked and (conf.get("spark.driver.memory", None) != memory
+                      or active.sparkContext.master != f"local[{cores}]"):
+            warnings.warn(f"a Spark session is already running ({active.sparkContext.master}, driver memory "
+                          f"{conf.get('spark.driver.memory', 'default')}); requested memory={memory} cores={cores} "
+                          "were NOT applied. Stop the session first to change them.", stacklevel=2)
+        return active
     # workers must use the same interpreter as the driver, or a venv/Windows install picks a different Python
     os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
     os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
-    memory = memory or os.environ.get("NBA_SPARK_MEMORY", "4g")
-    cores = cores or int(os.environ.get("NBA_SPARK_CORES", "4"))
     return (SparkSession.builder.master(f"local[{cores}]").appName(app)
             .config("spark.driver.memory", memory)
             .config("spark.ui.enabled", "false")
@@ -215,8 +288,13 @@ def get_spark(app: str = "nba-lake", memory: str | None = None, cores: int | Non
             .getOrCreate())
 
 
+def table_uri(table: str, root: Path | str | None = None) -> str:
+    """``file:///...`` URI of a lake table directory; works for relative roots (``Path.as_uri`` alone does not)."""
+    return table_path(table, root).resolve().as_uri()
+
+
 def spark_read(spark, table: str, root: Path | str | None = None):
     """The lake table as a Spark DataFrame (``season_year`` is a string column for partitioned tables)."""
-    path = table_path(table, root)
     dataset(table, root)  # same friendly FileNotFoundError as the other readers
-    return spark.read.option("basePath", path.as_uri()).parquet(path.as_uri())
+    uri = table_uri(table, root)
+    return spark.read.option("basePath", uri).parquet(uri)
