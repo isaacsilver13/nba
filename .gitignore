@@ -19,6 +19,7 @@ venv/
 /data/csv/
 /data/holdout/
 /data/sql/
+/data/lake/
 /data/all_odds.csv
 /data/processed_backup_*/
 
