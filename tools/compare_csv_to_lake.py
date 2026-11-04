@@ -23,7 +23,6 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import pandas as pd
-import pyarrow as pa
 import pyarrow.compute as pc
 
 REPO = Path(__file__).resolve().parent.parent
@@ -50,31 +49,16 @@ class Comparison:
         self.reasons.append(msg)
 
 
-def _kind(t: pa.DataType) -> str:
-    return "int" if pa.types.is_integer(t) else "float" if pa.types.is_floating(t) else "text"
-
-
-def _lake_stats(dset, cols: list[str], kinds: dict[str, str]) -> tuple[dict, set]:
-    stats = {c: {"nn": 0, "sum": 0.0} for c in cols}
-    for batch in dset.to_batches(columns=cols):
-        for c in cols:
-            arr = batch.column(batch.schema.get_field_index(c))
-            if kinds[c] == "text":
-                empty = pc.sum(pc.cast(pc.fill_null(pc.equal(arr, ""), False), pa.int64())).as_py() or 0
-                stats[c]["nn"] += len(arr) - arr.null_count - empty
-                stats[c]["sum"] += pc.sum(pc.utf8_length(arr)).as_py() or 0
-            else:
-                stats[c]["nn"] += len(arr) - arr.null_count
-                stats[c]["sum"] += pc.sum(arr).as_py() or 0
+def _lake_game_ids(dset) -> set:
     ids: set = set()
     if "game_id" in dset.schema.names:
         for batch in dset.to_batches(columns=["game_id"]):
             ids.update(pc.unique(batch.column(0)).drop_null().to_pylist())
-    return stats, ids
+    return ids
 
 
 def _csv_stats(path: Path, cols: list[str], kinds: dict[str, str], per_chunk: int):
-    stats = {c: {"nn": 0, "sum": 0.0, "bad": 0} for c in cols}
+    stats = {c: {"nn": 0, "sum": 0.0 if kinds[c] == "float" else 0, "bad": 0, "frac": 0} for c in cols}
     ids: set = set()
     rows = padded = 0
     reader = pd.read_csv(path, usecols=cols, dtype=str, keep_default_na=False, na_values=[""], chunksize=per_chunk,
@@ -94,7 +78,14 @@ def _csv_stats(path: Path, cols: list[str], kinds: dict[str, str], per_chunk: in
                 n = pd.to_numeric(s, errors="coerce")
                 stats[c]["bad"] += int((s.notna() & n.isna()).sum())
                 stats[c]["nn"] += int(n.notna().sum())
-                stats[c]["sum"] += float(n.sum())
+                if kinds[c] == "int":
+                    # exact: a float64 running total is only exact below 2**53, and team_id-style columns exceed it
+                    vals = n.dropna()
+                    frac = vals != vals.round()
+                    stats[c]["frac"] += int(frac.sum())
+                    stats[c]["sum"] += int(vals[~frac].astype("int64").sum())
+                else:
+                    stats[c]["sum"] += float(n.sum())
     return stats, ids, rows, padded
 
 
@@ -118,12 +109,13 @@ def compare_one(csv_path: Path, root=None, rel_tol: float = 1e-9, chunk_rows: in
     if lake_only:
         cmp.notes.append(f"lake has columns the CSV lacks (fine): {lake_only}")
     common = [c for c in csv_cols if c in lake_cols]
-    kinds = {f.name: _kind(f.type) for f in dset.schema}
+    kinds = {f.name: datalake.column_kind(f.type) for f in dset.schema}
 
     per_chunk = max(1000, min(chunk_rows, max_cells // max(1, len(common))))
     log(f"  {csv_path.name}: streaming CSV ({len(common)} columns, {per_chunk:,} rows per chunk) ...")
     cstats, cids, cmp.csv_rows, padded = _csv_stats(csv_path, common, kinds, per_chunk)
-    lstats, lids = _lake_stats(dset, common, kinds)
+    lstats = datalake.column_stats(dset, common)
+    lids = _lake_game_ids(dset)
 
     if padded:
         cmp.notes.append(f"CSV game_id had lost its leading zeros on {padded:,} values (zero-padded to compare)")
@@ -137,10 +129,13 @@ def compare_one(csv_path: Path, root=None, rel_tol: float = 1e-9, chunk_rows: in
         a, b = cstats[c], lstats[c]
         if a.get("bad"):
             cmp.differ(f"{c}: {a['bad']:,} CSV values are not numbers but the lake holds numbers")
-        if a["nn"] != b["nn"]:
-            cmp.differ(f"{c}: non-null count csv={a['nn']:,} lake={b['nn']:,}")
-        same = (math.isclose(a["sum"], float(b["sum"]), rel_tol=rel_tol, abs_tol=1e-6) if kinds[c] == "float"
-                else abs(a["sum"] - float(b["sum"])) < 0.5)
+        if a["frac"]:
+            cmp.differ(f"{c}: {a['frac']:,} CSV values are not whole numbers but the lake column is integer")
+        lake_nn = b["nn"] - b["empty"]  # an empty string in the lake is an empty (NULL) field in the CSV
+        if a["nn"] != lake_nn:
+            cmp.differ(f"{c}: non-null count csv={a['nn']:,} lake={lake_nn:,}")
+        same = (math.isclose(a["sum"], b["sum"], rel_tol=rel_tol, abs_tol=1e-6) if kinds[c] == "float"
+                else a["sum"] == b["sum"])  # integers and text lengths are compared exactly
         if not same:
             what = "text length sum" if kinds[c] == "text" else "sum"
             cmp.differ(f"{c}: {what} csv={a['sum']!r} lake={b['sum']!r}")

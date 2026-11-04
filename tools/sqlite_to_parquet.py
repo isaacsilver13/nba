@@ -266,45 +266,28 @@ def verify(sqlite_path, table: str, root=None, rel_tol: float = 1e-9, log=print)
             rep.fail(f"row count: sqlite={src_rows:,} lake={rep.rows:,}")
 
         common = [c for c in src_cols if c in lake_cols]
-        types = {f.name: f.type for f in dset.schema}
+        lstats = datalake.column_stats(dset, common, group=VERIFY_GROUP)
         for i in range(0, len(common), VERIFY_GROUP):
             group = common[i:i + VERIFY_GROUP]
-            exprs, kinds = [], {}
+            exprs = []
             for c in group:
-                t = types[c]
-                if pa.types.is_integer(t):
-                    kinds[c] = "int"
-                elif pa.types.is_floating(t):
-                    kinds[c] = "float"
-                else:
-                    kinds[c] = "text"
-                agg = f"sum(length({_q(c)}))" if kinds[c] == "text" else f"sum({_q(c)})"
+                agg = f"sum(length({_q(c)}))" if lstats[c]["kind"] == "text" else f"sum({_q(c)})"
                 exprs.append(f"count({_q(c)}), {agg}")
             srow = conn.execute(f"SELECT {', '.join(exprs)} FROM {_q(table)}").fetchone()
-            nn = {c: 0 for c in group}
-            tot = {c: 0 for c in group}
-            for batch in dset.to_batches(columns=group):
-                for c in group:
-                    arr = batch.column(batch.schema.get_field_index(c))
-                    nn[c] += len(arr) - arr.null_count
-                    if kinds[c] == "text":
-                        s = pc.sum(pc.utf8_length(arr)).as_py()
-                    else:
-                        s = pc.sum(arr).as_py()
-                    tot[c] += s or 0
             for j, c in enumerate(group):
                 s_nn, s_sum = srow[2 * j], srow[2 * j + 1]
+                lake = lstats[c]
                 rep.checks += 2
-                if nn[c] != s_nn:
-                    rep.fail(f"{table}.{c}: non-null count sqlite={s_nn:,} lake={nn[c]:,} "
-                             f"(null count sqlite={src_rows - s_nn:,} lake={rep.rows - nn[c]:,})")
-                if kinds[c] == "float":
-                    same = _close(s_sum, tot[c], rel_tol)
+                if lake["nn"] != s_nn:
+                    rep.fail(f"{table}.{c}: non-null count sqlite={s_nn:,} lake={lake['nn']:,} "
+                             f"(null count sqlite={src_rows - s_nn:,} lake={rep.rows - lake['nn']:,})")
+                if lake["kind"] == "float":
+                    same = _close(s_sum, lake["sum"], rel_tol)
                 else:
-                    same = int(s_sum or 0) == int(tot[c])
+                    same = int(s_sum or 0) == int(lake["sum"])
                 if not same:
-                    what = "text length sum" if kinds[c] == "text" else "sum"
-                    rep.fail(f"{table}.{c}: {what} sqlite={s_sum!r} lake={tot[c]!r}")
+                    what = "text length sum" if lake["kind"] == "text" else "sum"
+                    rep.fail(f"{table}.{c}: {what} sqlite={s_sum!r} lake={lake['sum']!r}")
             log(f"  verify {table}: {min(i + VERIFY_GROUP, len(common))}/{len(common)} columns")
 
         if "game_id" in lake_cols:

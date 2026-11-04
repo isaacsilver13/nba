@@ -292,3 +292,20 @@ def test_cli_converts_verifies_and_writes_a_report(tmp_path, capsys):
     assert datalake.tables() == ["games_index", "play_by_play"]  # _reports is not a table
     assert s2p.main(["--tables", "play_by_play"]) == 1  # existing lake table, no --overwrite
     assert s2p.main(["--tables", "play_by_play", "--verify-only"]) == 0
+
+
+def test_verify_is_exact_for_integer_sums_above_2_pow_53(tmp_path):
+    n = 5_000
+    rows = [(f"002190{i % 9000 + 1:04d}", 2_000_000_000_000 + i * 7 + 1) for i in range(n)]
+    assert sum(r[1] for r in rows) > 2 ** 53
+    db = make_db(tmp_path / "x.sqlite", "game_odds", [("game_id", "TEXT"), ("big", "NUMERIC")], rows)
+    s2p.convert(db, "game_odds", chunk_rows=700, log=lambda *_: None)
+    assert s2p.verify(db, "game_odds", log=lambda *_: None).ok
+    f = next(datalake.table_path("game_odds").glob("*.parquet"))
+
+    def bump(t):
+        vals = t.column("big").to_pylist()
+        vals[0] += 1
+        return t.set_column(t.schema.get_field_index("big"), "big", pa.array(vals, pa.int64()))
+    rewrite(f, bump)
+    assert any(m.startswith("game_odds.big: sum") for m in s2p.verify(db, "game_odds", log=lambda *_: None).failures)

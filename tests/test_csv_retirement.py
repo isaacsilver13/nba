@@ -238,3 +238,47 @@ def test_load_odds_prefers_lake_then_csv_and_explicit_path_wins(data_dir, monkey
     g, label = enc.load_odds(data_dir / "csv" / "game_odds.csv")
     assert label == "game_odds.csv" and (g["decimal_home"] == 9.0).all()
     assert enc.load_odds(data_dir / "csv" / "missing.csv") == (None, None)
+
+
+# ---- integer sums beyond 2**53 (play_by_play.team_id is ~1.6e9 x 18M rows ~ 2.9e16) ---------------------------------
+
+def big_int_df(n=20_000, base=1_600_000_000_000):
+    rng = np.random.default_rng(1)
+    return pd.DataFrame({"game_id": "0021900001", "season_year": "2019-20",
+                         "team_id": (base + rng.integers(0, 1_000_000, n)).astype("int64")})
+
+
+def test_integer_sum_above_2_pow_53_is_compared_exactly(data_dir):
+    df = big_int_df()
+    assert int(df["team_id"].sum()) > 2 ** 53
+    write_pair(data_dir, "play_boxscores_big", df=df)
+    r = cmp.compare_one(data_dir / "csv" / "play_boxscores_big.csv", chunk_rows=1_500, log=lambda *_: None)
+    assert r.identical, r.reasons
+
+
+def test_one_unit_change_in_a_huge_integer_sum_is_caught(data_dir):
+    df = big_int_df()
+    changed = df.copy()
+    changed.loc[7, "team_id"] += 1
+    write_pair(data_dir, "play_boxscores_big", df=df, csv_df=changed)
+    r = cmp.compare_one(data_dir / "csv" / "play_boxscores_big.csv", chunk_rows=1_500, log=lambda *_: None)
+    assert not r.identical and any(m.startswith("team_id: sum") for m in r.reasons)
+
+
+def test_integers_written_as_floats_because_of_nulls_are_identical(data_dir):
+    df = big_int_df(2_000, base=8_000_000_000_000)
+    assert int(df["team_id"].sum()) > 2 ** 53
+    df["team_id"] = df["team_id"].astype("Int64")
+    df.loc[3, "team_id"] = pd.NA  # the CSV writes the rest as plain digits, but pandas re-reads them as floats
+    write_pair(data_dir, "play_boxscores_big", df=df)
+    r = cmp.compare_one(data_dir / "csv" / "play_boxscores_big.csv", chunk_rows=500, log=lambda *_: None)
+    assert r.identical, r.reasons
+
+
+def test_fractional_values_in_an_integer_column_are_a_difference(data_dir):
+    df = big_int_df(100)
+    junk = df.copy().astype({"team_id": float})
+    junk.loc[2, "team_id"] += 0.5
+    write_pair(data_dir, "play_boxscores_big", df=df, csv_df=junk)
+    r = cmp.compare_one(data_dir / "csv" / "play_boxscores_big.csv", log=lambda *_: None)
+    assert not r.identical and any("not whole numbers" in m for m in r.reasons)

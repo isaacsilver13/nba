@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
@@ -131,6 +132,40 @@ def read_pandas(table: str, columns=None, filters=None, root: Path | str | None 
     """
     expr = pq.filters_to_expression(filters) if filters else None
     return dataset(table, root).to_table(columns=list(columns) if columns else None, filter=expr).to_pandas()
+
+
+def column_kind(arrow_type: pa.DataType) -> str:
+    """``int`` | ``float`` | ``text``: how a lake column is summed and compared by the verification tools."""
+    if pa.types.is_integer(arrow_type):
+        return "int"
+    if pa.types.is_floating(arrow_type):
+        return "float"
+    return "text"
+
+
+def column_stats(dset: ds.Dataset, cols=None, group: int = 40) -> dict:
+    """Stream per-column checksums of a lake dataset: ``{col: {kind, nn, empty, sum}}``.
+
+    ``nn`` counts non-null values; ``empty`` counts empty strings (text only); ``sum`` is the column total (exact
+    Python ``int`` for integer columns, a float for float columns) or, for text, the total character length.
+    Columns are read ``group`` at a time so a 200-column table never sits in memory whole.
+    """
+    names = list(cols) if cols is not None else list(dset.schema.names)
+    kinds = {n: column_kind(dset.schema.field(n).type) for n in names}
+    out = {n: {"kind": kinds[n], "nn": 0, "empty": 0, "sum": 0.0 if kinds[n] == "float" else 0} for n in names}
+    for i in range(0, len(names), group):
+        part = names[i:i + group]
+        for batch in dset.to_batches(columns=part):
+            for n in part:
+                arr = batch.column(batch.schema.get_field_index(n))
+                st = out[n]
+                st["nn"] += len(arr) - arr.null_count
+                if st["kind"] == "text":
+                    st["empty"] += pc.sum(pc.cast(pc.fill_null(pc.equal(arr, ""), False), pa.int64())).as_py() or 0
+                    st["sum"] += pc.sum(pc.utf8_length(arr)).as_py() or 0
+                else:
+                    st["sum"] += pc.sum(arr).as_py() or 0
+    return out
 
 
 def duck(root: Path | str | None = None):
