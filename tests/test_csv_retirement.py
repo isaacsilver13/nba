@@ -71,6 +71,26 @@ def test_csv_that_lost_leading_zeros_is_identical_with_a_note(data_dir):
     assert any("leading zeros" in n for n in r.notes)
 
 
+def test_csv_rows_with_an_unquoted_comma_are_reported_as_malformed(data_dir):
+    df = odds_df()
+    datalake.write_table("game_odds", df)
+    lines = (data_dir / "csv" / "game_odds.csv")
+    df.to_csv(lines, index=False)
+    text = lines.read_text().splitlines()
+    text[2] = text[2].replace("2020-01-01T00:00:00Z", "2020-01-01,T00:00:00Z", 1)  # one unquoted comma: 8 fields not 7
+    lines.write_text("\n".join(text) + "\n")
+    r = compare(data_dir)
+    assert not r.identical
+    assert "CSV is malformed: 1 rows" in r.reasons[0] and "{8: 1}" in r.reasons[0]
+
+
+def test_well_formed_csv_with_quoted_commas_and_newlines_is_not_malformed(data_dir):
+    df = odds_df().assign(odds_date=["a, b", 'say "hi"', "line1\nline2", None])
+    write_pair(data_dir, df=df)
+    r = compare(data_dir)
+    assert r.identical, r.reasons
+
+
 def test_extra_csv_column_is_a_difference(data_dir):
     df = odds_df()
     write_pair(data_dir, df=df, csv_df=df.assign(only_in_csv=1))

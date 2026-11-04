@@ -44,6 +44,8 @@ The converter opens the SQLite files read-only, writes to a hidden staging folde
 after every chunk is written (an existing table needs `--overwrite`). `verify` compares row counts, null counts,
 numeric sums and text-length sums with the source. Nothing here deletes `data/sql`, `data/csv` or any backup.
 
+`compare_csv_to_lake.py` also reports CSV rows whose field count differs from the header ("CSV is malformed"). Run on the real data, it found 5,292 such rows in `play_by_play.csv` (a description with an unquoted comma, e.g. `Double Technical - Castle, McDaniels (T.Ford)`, was split in two, shifting the later columns). The lake, which matches the SQLite source, holds those descriptions intact, so that CSV is the damaged copy and not a second source of truth.
+
 Each run records its results in `lake/_reports/sqlite_to_parquet.json` (merged per table across runs). A table counts
 as *verified* only if its last verification passed and nothing has been written to it since. Tools that used to read a
 `data/csv` file (`tools/backfill_boxscores.py`, `tools/encompass_check.py`) read the lake only once the table is

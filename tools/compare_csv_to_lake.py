@@ -15,6 +15,8 @@ that lost its leading zeros is zero-padded to 10 digits before comparing (and co
 from __future__ import annotations
 
 import argparse
+import collections
+import csv
 import json
 import math
 import os
@@ -55,6 +57,25 @@ def _lake_game_ids(dset) -> set:
         for batch in dset.to_batches(columns=["game_id"]):
             ids.update(pc.unique(batch.column(0)).drop_null().to_pylist())
     return ids
+
+
+def malformed_rows(path: Path):
+    """Rows whose field count differs from the header's, read with the csv module (which honours quoting).
+
+    pandas does not raise on these when ``usecols`` is given: it quietly reads shifted columns. A writer that leaves a
+    comma inside a text field unquoted splits that field in two, so every later column moves one place to the right.
+    Returns (counts by field count, first few (line, fields) examples, header width)."""
+    sizes: collections.Counter = collections.Counter()
+    first: list = []
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.reader(f)
+        width = len(next(reader, []))
+        for row in reader:
+            if len(row) != width:
+                sizes[len(row)] += 1
+                if len(first) < 3:
+                    first.append((reader.line_num, len(row)))
+    return dict(sizes), first, width
 
 
 def _csv_stats(path: Path, cols: list[str], kinds: dict[str, str], per_chunk: int):
@@ -101,6 +122,14 @@ def compare_one(csv_path: Path, root=None, rel_tol: float = 1e-9, chunk_rows: in
     lake_cols = dset.schema.names
     csv_cols = list(pd.read_csv(csv_path, nrows=0).columns)
     cmp.lake_rows = dset.count_rows()
+
+    sizes, first, width = malformed_rows(csv_path)
+    if sizes:
+        total = sum(sizes.values())
+        cmp.differ(f"CSV is malformed: {total:,} rows do not have the header's {width} fields "
+                   f"(field counts {sizes}; first at lines {[line for line, _ in first]}). A text field with an "
+                   f"unquoted comma was split, so those rows' later columns are shifted; the differences below "
+                   f"are probably consequences of that")
 
     extra = [c for c in csv_cols if c not in lake_cols]
     if extra:
