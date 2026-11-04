@@ -6,7 +6,7 @@
     python tools/encompass_check.py --selftest
 
 Spread: regress the closing line's error on the model's edge (slope 0 = no information beyond the close).
-Moneyline (csv/game_odds.csv, TeamRankings): win prob p = Phi(pred / s), s fit on EARLIER folds' outcomes; de-vigged
+Moneyline (game_odds: lake table, else csv/game_odds.csv; TeamRankings): win prob p = Phi(pred / s), s fit on EARLIER folds' outcomes; de-vigged
 open (first snapshot, ~night before), game-day 10am ET, and close. Reports the CLV slope (logit move to close ~ logit
 model gap), mean CLV and ROI of EV>3% bets at each entry, encompassing vs the close, and an Elo-only placebo.
 
@@ -30,6 +30,9 @@ from scipy.optimize import minimize
 from scipy.stats import norm
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from src.ingest import datalake  # noqa: E402
+
 DATA = Path(os.environ.get("NBA_DATA_DIR", ROOT / "data"))
 logit = lambda p: np.log(p / (1 - p))
 
@@ -154,8 +157,23 @@ def ev_bets(d, p, t):
     return clv, ret
 
 
-def moneyline_report(d, odds_path):
-    g = pd.read_csv(odds_path, dtype={"game_id": str})
+def load_odds(path=None):
+    """(game_odds frame, label). An explicit CSV path wins; otherwise the lake's game_odds table once it is verified
+    (datalake.prefer_lake), else csv/game_odds.csv. (None, None) when there is no source."""
+    if path:
+        p = Path(path)
+        return (pd.read_csv(p, dtype={"game_id": str}), p.name) if p.exists() else (None, None)
+    csv = DATA / "csv" / "game_odds.csv"
+    use_lake, message = datalake.prefer_lake("game_odds", csv_exists=csv.is_file())
+    if message:
+        print(message)
+    if use_lake:
+        return datalake.read_pandas("game_odds"), "lake/game_odds"
+    return (pd.read_csv(csv, dtype={"game_id": str}), csv.name) if csv.is_file() else (None, None)
+
+
+def moneyline_report(d, odds):
+    g = odds.copy()
     g["gid"] = g.game_id.astype(int)
     g = g[g.gid.isin(set(d.GAME_ID_KEY.astype(int)))]
     snap = g[~g.odds_date.isin(["open", "close"])].copy()
@@ -236,7 +254,7 @@ if __name__ == "__main__":
     ap.add_argument("--preds", help="cached OOS predictions CSV (skips running experiment.py)")
     ap.add_argument("--out", default=str(Path(os.environ.get("NBA_OUTPUTS_DIR", ROOT / "outputs")) / "oos_preds.csv"))
     ap.add_argument("--exclude", default="", help="comma-separated features to drop before re-running experiment.py")
-    ap.add_argument("--odds", default=str(DATA / "csv" / "game_odds.csv"))
+    ap.add_argument("--odds", default=None, help="game_odds CSV (default: the lake's game_odds, else csv/game_odds.csv)")
     ap.add_argument("--raw-target", action="store_true", help="fit home_margin directly (no market-error offset) so the closing line cannot be in pred")
     ap.add_argument("--allow-line-leak", action="store_true", help="run the moneyline section even though the prediction contains the closing line (results are an artifact)")
     ap.add_argument("--selftest", action="store_true")
@@ -252,7 +270,9 @@ if __name__ == "__main__":
         sys.exit(f"[moneyline] REFUSED: {why}. (--allow-line-leak overrides; the numbers will not mean what they appear to.)")
     if why:
         print(f"[moneyline] WARNING (overridden): {why}")
-    if "GAME_ID_KEY" in d and Path(a.odds).exists():
-        moneyline_report(d, a.odds)
+    odds, label = load_odds(a.odds) if "GAME_ID_KEY" in d else (None, None)
+    if odds is not None:
+        print(f"[moneyline] odds from {label}")
+        moneyline_report(d, odds)
     else:
-        print("[moneyline] skipped: needs GAME_ID_KEY in preds and csv/game_odds.csv")
+        print("[moneyline] skipped: needs GAME_ID_KEY in preds and game_odds (lake table or csv/game_odds.csv)")
