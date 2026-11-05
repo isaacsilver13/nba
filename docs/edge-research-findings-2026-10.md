@@ -3,8 +3,12 @@
 Two spikes after the 2026-10-08 encompassing test showed experiment.py's spread model adds ~nothing beyond the
 closing spread. Question for both: is there an exploitable edge, measured by CLV / encompassing rather than noisy ROI?
 
-> **Correction (2026-11-03): the moneyline CLV "go" below is retracted. It is a leak artifact.**
-> `experiment.py` trains on the market's error (`home_margin + spread_signed`) and adds the closing line back
+> **Correction (2026-11-03, wording revised 2026-11-05): the moneyline CLV "go" below is retracted.** It is not
+> supported: the current code leaks the closing line into the prediction (shown below), and a leak-free model shows no
+> early-price edge. Whether that leak explains the *original* +4.3% / +1.4% is not established; see "What is and is not
+> established" at the end of this block.
+>
+> In the current code, `experiment.py` trains on the market's error (`home_margin + spread_signed`) and adds the closing line back
 > (`_run_fold`), so `pred_ensemble` is the closing line plus a ~3pt model deviation (corr with the line 0.92, 85% of
 > its variance). Dropping `spread_signed` from the *features* does not remove it from the *prediction*, so
 > `p_model = Φ(pred/s)` is "close + noise" and mechanically predicts open→close moves, with an edge that decays as the
@@ -12,7 +16,7 @@ closing spread. Question for both: is there an exploitable edge, measured by CLV
 >
 > | Variant | CLV at open | CLV at 10am |
 > |---|---|---|
-> | Model as run in Spike 1 | +4.4% | +1.5% |
+> | Spike 1 model, re-run on the current code (market-error target) | +4.4% | +1.5% |
 > | Placebo: closing line + *shuffled* model deviations (no information) | +4.0 to +4.5% | +1.1 to +1.4% |
 > | Raw-margin target, no line in features or target | **−2.0%** | **−2.9%** |
 >
@@ -23,13 +27,27 @@ closing spread. Question for both: is there an exploitable edge, measured by CLV
 > `python tools/encompass_check.py --raw-target --exclude spread_signed,is_home_favorite --out outputs/oos_raw.csv`
 > (`--raw-target` fits `home_margin` directly, with no `- line_te` offset, so the closing line cannot enter the
 > prediction; no manual patching of `_run_fold` is needed). Add `--preds outputs/oos_raw.csv` to re-report from the cache.
+>
+> **What is and is not established (added 2026-11-05).**
+> - *Established:* (a) from `380e6db` (2026-10-20) `_run_fold` fits `home_margin + spread_signed` and adds the closing line
+>   back, so predictions contain the close; (b) on that code a zero-information placebo reproduces +4.0 to +4.5% / +1.1 to
+>   +1.4%; (c) a raw-margin target gives −2.0% / −2.9%.
+> - *Not established:* that this leak produced the **original** 2026-10-08 numbers. The `- line_te` offset first appears in
+>   `380e6db`; at `7420a3f` (2026-10-19) `_run_fold` still fit the raw `home_margin`. So the 10-08 spike most likely ran on
+>   a raw target, and the "re-run on the current code" row above comes from later code. The original run and today's
+>   raw-target run use equivalent targets yet disagree (+4.3% vs −2.0% at the open), and that gap is unexplained. Untested
+>   candidates: the uncommitted working tree the spike ran on (see the Reproduce note in Spike 1); an "open" price posted
+>   before the previous night's games finished, which looks ahead for back-to-back teams (raised in the 2026-10-23 stage-2
+>   plan on nba#21, not yet merged); and spread-price features (`payout_*`) that the Spike 1 exclusion list did not drop
+>   (`tools/predict_today.py` does drop them).
+> - *Conclusion unchanged:* no early-price edge is demonstrated. Do not forward-test or bet on the Spike 1 numbers.
 
 **Bottom line**
 
 | Question | Verdict |
 |---|---|
 | Does the model beat the moneyline **close**? | No. Encompassing slope 0.01 (se 0.09). |
-| Does it beat **earlier** moneyline prices (CLV)? | ~~Yes, robustly.~~ **No (retracted 2026-11-03).** The apparent CLV (+1.4% at 10am, +4.3% at open) comes from the closing line baked into the prediction; a closing-line + shuffled-noise placebo reproduces it, and a leak-free model gets CLV −2% to −3%. |
+| Does it beat **earlier** moneyline prices (CLV)? | ~~Yes, robustly.~~ **No (retracted 2026-11-03).** The current code bakes the closing line into the prediction, and a closing-line + shuffled-noise placebo reproduces the apparent CLV (+1.4% at 10am, +4.3% at open) on it; a leak-free model gets CLV −2% to −3%. Why the original 10-08 run showed +4.3% is not established (see the Correction). |
 | Does a simple points model beat Kalshi **early** (3–24h before tip) prop prices? | **No.** Same result as pre-tip: encompassing slope −0.05 to +0.10, all n.s.; taker ROI −6% to −18%. See Spike 3. |
 | Does a simple points model beat Kalshi pre-tip prop prices? | **No.** Kalshi's pre-tip mid is well calibrated and better than the model (Brier 0.169 vs 0.175); encompassing slope +0.008 (se 0.058); taker ROI −7% to −12% after fees. |
 
@@ -49,8 +67,10 @@ closing spread. Question for both: is there an exploitable edge, measured by CLV
 
 ## Spike 1: moneyline CLV and encompassing
 
-> **Superseded by the Correction at the top: the CLV results in this section are a closing-line leak artifact.**
-> The "Leak found first" paragraph below removed the line from the features but not from the target/prediction.
+> **Superseded by the Correction at the top: the CLV results in this section are retracted.** A leak-free model shows no
+> such CLV, and the cause of these original numbers is not established.
+> The "Leak found first" paragraph below removed the line from the features. In the code from 2026-10-20 on, the line also
+> stays in the target/prediction (the Correction explains why that matters and what is unproven).
 
 **Data.** experiment.py's out-of-sample predictions, 14 walk-forward folds of 300 games (2021-12 to 2025-03).
 Fold 1 is dropped because it has no earlier data to calibrate on, leaving 3,846 games with valid TeamRankings moneylines
