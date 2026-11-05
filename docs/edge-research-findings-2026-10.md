@@ -3,24 +3,60 @@
 Two spikes after the 2026-10-08 encompassing test showed experiment.py's spread model adds ~nothing beyond the
 closing spread. Question for both: is there an exploitable edge, measured by CLV / encompassing rather than noisy ROI?
 
+> **Correction (2026-11-03, wording revised 2026-11-05): the moneyline CLV "go" below is retracted.** It is not
+> supported: the current code leaks the closing line into the prediction (shown below), and a leak-free model shows no
+> early-price edge. Whether that leak explains the *original* +4.3% / +1.4% is not established; see "What is and is not
+> established" at the end of this block.
+>
+> In the current code, `experiment.py` trains on the market's error (`home_margin + spread_signed`) and adds the closing line back
+> (`_run_fold`), so `pred_ensemble` is the closing line plus a ~3pt model deviation (corr with the line 0.92, 85% of
+> its variance). Dropping `spread_signed` from the *features* does not remove it from the *prediction*, so
+> `p_model = Φ(pred/s)` is "close + noise" and mechanically predicts open→close moves, with an edge that decays as the
+> entry nears the close (the +4.3% / +1.4% / 0 pattern). Re-run on the same 4,020 games (2022-02 to 2025-04):
+>
+> | Variant | CLV at open | CLV at 10am |
+> |---|---|---|
+> | Spike 1 model, re-run on the current code (market-error target) | +4.4% | +1.5% |
+> | Placebo: closing line + *shuffled* model deviations (no information) | +4.0 to +4.5% | +1.1 to +1.4% |
+> | Raw-margin target, no line in features or target | **−2.0%** | **−2.9%** |
+>
+> The leak-free model has log loss 0.635 vs the market's 0.605 and RMSE 14.2 vs 13.4, so it has no early-price edge.
+> The Elo placebo was never a fair control (Elo is simply a worse forecaster). The CLV SE of ~0.25–0.3% below is for
+> n≈2,700; at n=200 it is ~0.9%, and confirming +1% CLV would take ~1,400 bets for 2 SE. Kalshi results (Spikes 2–3)
+> are unaffected. Spike 1 is kept for the record only. Reproduce the clean run with
+> `python tools/encompass_check.py --raw-target --exclude spread_signed,is_home_favorite --out outputs/oos_raw.csv`
+> (`--raw-target` fits `home_margin` directly, with no `- line_te` offset, so the closing line cannot enter the
+> prediction; no manual patching of `_run_fold` is needed). Add `--preds outputs/oos_raw.csv` to re-report from the cache.
+>
+> **What is and is not established (added 2026-11-05).**
+> - *Established:* (a) from `380e6db` (2026-10-20) `_run_fold` fits `home_margin + spread_signed` and adds the closing line
+>   back, so predictions contain the close; (b) on that code a zero-information placebo reproduces +4.0 to +4.5% / +1.1 to
+>   +1.4%; (c) a raw-margin target gives −2.0% / −2.9%.
+> - *Not established:* that this leak produced the **original** 2026-10-08 numbers. The `- line_te` offset first appears in
+>   `380e6db`; at `7420a3f` (2026-10-19) `_run_fold` still fit the raw `home_margin`. So the 10-08 spike most likely ran on
+>   a raw target, and the "re-run on the current code" row above comes from later code. The original run and today's
+>   raw-target run use equivalent targets yet disagree (+4.3% vs −2.0% at the open), and that gap is unexplained. Untested
+>   candidates: the uncommitted working tree the spike ran on (see the Reproduce note in Spike 1); an "open" price posted
+>   before the previous night's games finished, which looks ahead for back-to-back teams (raised in the 2026-10-23 stage-2
+>   plan on nba#21, not yet merged); and spread-price features (`payout_*`) that the Spike 1 exclusion list did not drop
+>   (`tools/predict_today.py` does drop them).
+> - *Conclusion unchanged:* no early-price edge is demonstrated. Do not forward-test or bet on the Spike 1 numbers.
+
 **Bottom line**
 
 | Question | Verdict |
 |---|---|
 | Does the model beat the moneyline **close**? | No. Encompassing slope 0.01 (se 0.09). |
-| Does it beat **earlier** moneyline prices (CLV)? | **Yes, robustly.** Betting EV>3% at the game-day ~10am ET price: mean CLV +1.4% (se 0.26%); at the overnight open +4.3% (se 0.36%). Survives removing every closing-line/same-day feature; an Elo-only placebo loses. |
+| Does it beat **earlier** moneyline prices (CLV)? | ~~Yes, robustly.~~ **No (retracted 2026-11-03).** The current code bakes the closing line into the prediction, and a closing-line + shuffled-noise placebo reproduces the apparent CLV (+1.4% at 10am, +4.3% at open) on it; a leak-free model gets CLV −2% to −3%. Why the original 10-08 run showed +4.3% is not established (see the Correction). |
 | Does a simple points model beat Kalshi **early** (3–24h before tip) prop prices? | **No.** Same result as pre-tip: encompassing slope −0.05 to +0.10, all n.s.; taker ROI −6% to −18%. See Spike 3. |
 | Does a simple points model beat Kalshi pre-tip prop prices? | **No.** Kalshi's pre-tip mid is well calibrated and better than the model (Brier 0.169 vs 0.175); encompassing slope +0.008 (se 0.058); taker ROI −7% to −12% after fees. |
 
 **Recommendation**
 
-- **Go: forward-test early moneylines, with no new model.** The existing spread model, run without the closing-line
-  features, already shows CLV against overnight and morning prices. Next steps:
-  - The odds collector logs timestamped per-book moneylines from the open through tip.
-  - Paper-bet games with EV>3% at the earliest price available to you in Illinois, and track CLV against the close.
-  - Go to real money only if CLV holds at about +1% or better over ~200+ bets. That is roughly 4 SE, since the CLV
-    SE at n=200 is ~0.25–0.3%.
-  - Once experiment.py stops feeding the model the closing spread, its own scoring will reflect this.
+- **~~Go: forward-test early moneylines~~ — retracted (see Correction).** There is no demonstrated early-price edge.
+  Keep the odds collector logging timestamped per-book prices; that data is still what any future test needs. A
+  forward test is only worth running on a model whose prediction contains no closing line, and with a bar sized to the
+  real SE (~0.9% at n=200, so ~1,400 bets for 2 SE at +1% CLV).
 - **No-go: building a full player-prop model aimed at Kalshi pre-tip prices.** A minutes × rate baseline with
   teammate-out adjustment is close to what the market already prices. The market beats it, and fees plus the ~3¢
   regular-season spread remove any margin. A fuller model would mostly need *faster information* (late scratches,
@@ -30,6 +66,11 @@ closing spread. Question for both: is there an exploitable edge, measured by CLV
 ---
 
 ## Spike 1: moneyline CLV and encompassing
+
+> **Superseded by the Correction at the top: the CLV results in this section are retracted.** A leak-free model shows no
+> such CLV, and the cause of these original numbers is not established.
+> The "Leak found first" paragraph below removed the line from the features. In the code from 2026-10-20 on, the line also
+> stays in the target/prediction (the Correction explains why that matters and what is unproven).
 
 **Data.** experiment.py's out-of-sample predictions, 14 walk-forward folds of 300 games (2021-12 to 2025-03).
 Fold 1 is dropped because it has no earlier data to calibrate on, leaving 3,846 games with valid TeamRankings moneylines
@@ -90,10 +131,12 @@ through the day: about +4% overnight, about +1.4% by mid-morning, and zero at th
 
 **How to verify forward.** Have the odds collector log timestamped per-book moneylines from the overnight open
 through tip. Paper-bet EV>3% games at the first price actually available to you, and track CLV against the close.
-At n≈200 bets the CLV SE is ~0.9%, enough to tell +1.4% from 0.
+At n≈200 bets the CLV SE is ~0.9%, which is NOT enough to tell +1.4% from 0 (that needs ~700 bets for 2 SE).
 
-Reproduce: `python tools/encompass_check.py --exclude spread_signed,is_home_favorite,pregame_missing_top1,pregame_missing_top2,pregame_minutes_out,pregame_usage_out --out outputs/oos_noline.csv`
-(~3 min). Add `--preds outputs/oos_noline.csv` to re-report from the cache. Note: the numbers above were produced
+Reproduce (the retracted run, for the record only): `python tools/encompass_check.py --exclude spread_signed,is_home_favorite,pregame_missing_top1,pregame_missing_top2,pregame_minutes_out,pregame_usage_out --out outputs/oos_noline.csv`
+(~3 min). Add `--preds outputs/oos_noline.csv` to re-report from the cache. Since 2026-11-03 the moneyline section
+REFUSES to run on these preds, because the closing line is inside them (`line_sensitivity` guard); `--allow-line-leak`
+overrides, and the numbers are then meaningless. For a valid run add `--raw-target`. Note: the numbers above were produced
 with the main checkout's working-tree `experiment.py` (uncommitted `settle_signed` changes), not this branch's
 copy.
 
