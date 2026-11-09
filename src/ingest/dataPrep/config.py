@@ -154,6 +154,45 @@ DEFAULT_CONFIG = {
                 }
             },
         },
+        # Opt-in lineup research step (build_lineup_stints); not part of the scheduled pipeline.
+        "stints": {
+            "paths": {
+                "pbp_dir": "data/raw/pbp/nba_data",
+                "input_boxscores": "data/processed/all_boxscores.csv",
+                "input_games": "data/processed/nba_games_with_game_id.csv",
+                "output_stints": "data/processed/lineup_stints.csv",
+                "output_audit": "data/processed/lineup_stint_audit.csv",
+            },
+            "stints": {
+                "seasons": [2019, 2020, 2021, 2022, 2023, 2024, 2025],  # nba_data file year = season start year
+                "minutes_tolerance_sec": 60,
+            },
+        },
+        "lineup_features": {
+            "paths": {
+                "input_stints": "data/processed/lineup_stints.csv",
+                "input_boxscores": "data/processed/all_boxscores.csv",
+                "input_games": "data/processed/nba_games_with_game_id.csv",
+                "output_features": "data/processed/lineup_features.csv",
+            },
+            "lineup_features": {
+                "window": 10,  # prior same-season team games feeding a row
+                "shrink_poss": 300,  # a five's net rating counts half-weight at this many possessions
+            },
+        },
+        "tracking_features": {
+            "paths": {
+                "input_boxscores": "data/processed/all_boxscores.csv",
+                "input_games": "data/processed/nba_games_with_game_id.csv",
+                "output_features": "data/processed/tracking_features.csv",
+            },
+            "tracking_features": {
+                "window": 10,  # prior same-season team games feeding a row
+                "top_n": 8,  # rotation size, by window minutes
+                "shrink_att": 50,  # rim attempts of prior weight when shrinking rim FG% allowed
+                "league_rim_fg": 0.65,  # fixed prior (league rim FG% allowed was 0.635-0.657 in every tracked season)
+            },
+        },
         "step6": {
             "paths": {
                 "input_team_opp": "data/processed/team opp stats.csv",

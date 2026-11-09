@@ -1,6 +1,7 @@
 # NBA Research
 
 A Python research pipeline for NBA features, walk-forward modeling, historical betting simulations, and a Streamlit results dashboard. It also contains daily forecast and forward-only odds-collection workflows.
+The betting methodology (markets, edge theses, evaluation rules, stages) is in [docs/methodology.md](docs/methodology.md).
 
 ## What is here
 
