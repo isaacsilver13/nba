@@ -64,7 +64,7 @@ jobs:
       # and the predictions match a local run. xgboost-cpu = xgboost without the ~300 MB CUDA wheels.
       - run: >-
           pip install numpy==2.5.3 pandas==3.0.6 scipy==1.18.1 scikit-learn==1.9.1 lightgbm==4.7.0
-          xgboost-cpu==3.4.1 joblib==1.6.0 requests==2.34.2
+          xgboost-cpu==3.4.1 joblib==1.6.0 requests==2.34.2 pyarrow==25.0.1
       - name: Restore newest state
         run: |
           tag=""
